@@ -612,6 +612,19 @@ export default function SuusPage() {
       stopVisualizer()
       streamingRef.current = false; streamingTextRef.current = ''
       userStreamRef.current = false; userStreamTextRef.current = ''
+
+      // Stuur summary email
+      const snapMsgs    = msgs.filter(m => m.text?.trim())
+      const snapCompany = company
+      const snapTimer   = timer
+      if (snapMsgs.length > 0) {
+        fetch('/api/send-summary', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ msgs: snapMsgs, company: snapCompany, duration: snapTimer }),
+        }).catch(() => {/* fire and forget */})
+      }
+
       Object.keys(_collected).forEach(k => delete (_collected as Record<string, unknown>)[k])
       setCallStatus('idle'); setAgentTalking(false); setUserTalking(false); setMuted(false)
       setDemoStage('lookup'); setCompany(null); setMsgs([])
