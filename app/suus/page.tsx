@@ -275,7 +275,7 @@ const setupAgent = new RealtimeAgent({
 
 type CompanyInfo = { name: string; address?: string; city?: string; phone?: string; found?: boolean; contactNaam?: string }
 type ContactCardData = { contactId: string; companyName: string | null; firstName: string | null; lastName: string | null; city: string | null; phone: string | null }
-type Msg = { role: 'user' | 'ai'; text: string; streaming?: boolean; image_url?: string; briefingData?: BriefingData; contactsData?: ContactCardData[] }
+type Msg = { role: 'user' | 'ai'; text: string; streaming?: boolean; image_url?: string; briefingData?: BriefingData; contactsData?: ContactCardData[]; companyData?: CompanyInfo }
 
 /* ── WAV encoder (PCM 16-bit mono) ──────────────────────────────────────── */
 function encodeWav(decoded: AudioBuffer): ArrayBuffer {
@@ -740,22 +740,25 @@ export default function SuusPage() {
 
         const briefingMatch = full.match(/\n__BRIEFING__:(.+)/)
         const contactsMatch = full.match(/\n__CONTACTS__:(.+)/)
+        const companyMatch  = full.match(/\n__COMPANY__:(.+)/)
 
-        if (briefingMatch) {
-          const vis = full.replace(/\n__BRIEFING__:.+/, '').trim()
-          try {
-            const parsed = JSON.parse(briefingMatch[1]) as BriefingData
-            setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: vis, briefingData: parsed, streaming: false } : m))
-          } catch { setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: vis } : m)) }
-        } else if (contactsMatch) {
-          const vis = full.replace(/\n__CONTACTS__:.+/, '').trim()
-          try {
-            const parsed = JSON.parse(contactsMatch[1]) as { contacts: ContactCardData[] }
-            setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: vis, contactsData: parsed.contacts, streaming: false } : m))
-          } catch { setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m)) }
-        } else {
-          setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m))
-        }
+        // Strip all markers for display
+        const visText = full
+          .replace(/\n__BRIEFING__:.+/, '')
+          .replace(/\n__CONTACTS__:.+/, '')
+          .replace(/\n__COMPANY__:.+/, '')
+          .trim()
+
+        const extra: Partial<Msg> = {}
+        if (briefingMatch) { try { extra.briefingData  = JSON.parse(briefingMatch[1]) as BriefingData } catch { /* ignore */ } }
+        if (contactsMatch)  { try { extra.contactsData = (JSON.parse(contactsMatch[1]) as { contacts: ContactCardData[] }).contacts } catch { /* ignore */ } }
+        if (companyMatch)   { try { extra.companyData  = JSON.parse(companyMatch[1]) as CompanyInfo } catch { /* ignore */ } }
+
+        const hasMarker = briefingMatch || contactsMatch || companyMatch
+        setMsgs(p => p.map((m, i) => i === p.length - 1
+          ? { ...m, text: visText, ...extra, streaming: hasMarker ? false : m.streaming }
+          : m,
+        ))
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
       }
       setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, streaming: false } : m))
@@ -877,6 +880,44 @@ export default function SuusPage() {
                       </div>
                     )}
                     {!m.text && m.streaming && <TypingDots />}
+
+                    {/* Inline company card (text chat result) */}
+                    {m.companyData && !m.streaming && (
+                      <div className="mt-2.5 max-w-[420px]">
+                        <div className="flex items-start gap-3 px-4 py-3 bg-surface border border-border rounded-[14px] shadow-card">
+                          <div className="w-9 h-9 rounded-[10px] bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <Building2 size={17} className="text-primary" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[14px] font-semibold text-primary">{m.companyData.name}</span>
+                              {m.companyData.found !== undefined && (
+                                <span className={cn(
+                                  'text-[10px] font-semibold px-2 py-0.5 rounded-full',
+                                  m.companyData.found ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+                                )}>
+                                  {m.companyData.found ? '✓ Gevonden in CRM' : '+ Aangemaakt in CRM'}
+                                </span>
+                              )}
+                            </div>
+                            {m.companyData.contactNaam && (
+                              <p className="text-[12px] text-secondary font-medium mt-0.5">{m.companyData.contactNaam}</p>
+                            )}
+                            {(m.companyData.address || m.companyData.city) && (
+                              <div className="flex items-center gap-1 mt-1">
+                                <MapPin size={11} className="text-muted flex-shrink-0" />
+                                <span className="text-[12px] text-muted">
+                                  {[m.companyData.address, m.companyData.city].filter(Boolean).join(', ')}
+                                </span>
+                              </div>
+                            )}
+                            {m.companyData.phone && (
+                              <p className="text-[11px] text-muted mt-0.5">{m.companyData.phone}</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Briefing card */}
                     {m.briefingData && !m.streaming && (
