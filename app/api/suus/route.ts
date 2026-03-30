@@ -4,7 +4,7 @@ export async function POST() {
   const encoder = new TextEncoder()
   const stream  = new ReadableStream({
     start(controller) {
-      controller.enqueue(encoder.encode('Gebruik de **Bellen** knop rechtsbovenin om een gesprek te starten met Süüs.'))
+      controller.enqueue(encoder.encode('Gebruik de **Bellen** knop rechtsbovenin om een gesprek te starten met Suus.'))
       controller.close()
     },
   })

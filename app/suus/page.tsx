@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { RealtimeAgent, RealtimeSession, tool } from '@openai/agents/realtime'
 import { z } from 'zod'
-import { ArrowUp, Mic, MicOff, AudioLines, Phone, MapPin, Building2, Loader2 } from 'lucide-react'
+import { ArrowUp, Mic, MicOff, AudioLines, Phone, MapPin, Building2, Loader2, X, Plus, ImageIcon, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
@@ -33,7 +33,7 @@ const TODAY = new Date().toLocaleDateString('nl-NL', {
   weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Europe/Amsterdam',
 })
 
-const BASE_RULES = `Je bent Süüs, de AI sales-assistent — LIVE DEMO.
+const BASE_RULES = `Je bent Suus, de AI sales-assistent — LIVE DEMO.
 KRITIEK: Spreek ALTIJD en UITSLUITEND Nederlands, ongeacht de taal van de gebruiker.
 KRITIEK: Houd elke respons KORT — maximaal 1–2 zinnen. Geen opsommingen, geen uitleg.
 Spreek direct — dit is een gesprek, geen presentatie.
@@ -57,7 +57,7 @@ const SETUP_INSTRUCTIONS = `${BASE_RULES}
   {
     "id": "1_greeting",
     "instructions": [
-      "Zeg ALTIJD exact als openingszin: 'Hoi! Ik ben Süüs! Noem de bedrijf- en plaatsnaam, dan help ik je verder.'",
+      "Zeg ALTIJD exact als openingszin: 'Hoi! Ik ben Suus! Noem de bedrijf- en plaatsnaam, dan help ik je verder.'",
       "Een begroeting zoals 'hallo', 'hoi', 'hey', 'hello' is NOOIT een bedrijfsnaam.",
       "Beide (bedrijfsnaam én plaatsnaam) moeten expliciet zijn voor je verder gaat."
     ],
@@ -253,6 +253,26 @@ const contact_zoek_tool = tool({
   },
 })
 
+// ── Voice normalizers ─────────────────────────────────────────────────────────
+function normalizeEmail(raw?: string): string | undefined {
+  if (!raw) return undefined
+  return raw
+    .toLowerCase()
+    .replace(/\s+/g, '')                              // spaties weg
+    .replace(/apenstaartje|apostaatje|apestaartje|at\b/g, '@')
+    .replace(/\bpunt\b|\.(?!\w)/g, '.')               // "punt" → .
+    .replace(/\bstreepje\b/g, '-')
+    .replace(/\bunderscore\b|laag streepje/g, '_')
+    .replace(/[^a-z0-9@._\-+]/g, '')                 // alles weg behalve geldig
+}
+
+function normalizePhone(raw?: string): string | undefined {
+  if (!raw) return undefined
+  // Verwijder alles behalve cijfers en +
+  const digits = raw.replace(/[^\d+]/g, '')
+  return digits || undefined
+}
+
 const contact_create_tool = tool({
   name: 'contact_create',
   description: 'Maak een nieuw contact aan in het CRM.',
@@ -270,8 +290,8 @@ const contact_create_tool = tool({
       company_name: args.bedrijfsnaam,
       city:         args.plaatsnaam,
       first_name:   args.voornaam,
-      email:        args.email,
-      phone:        args.telefoon,
+      email:        normalizeEmail(args.email),
+      phone:        normalizePhone(args.telefoon),
       type:         args.klantType === 'Klant' ? 'customer' : 'lead',
     }
     const result    = await callMcp('contact_create', payload)
@@ -399,7 +419,30 @@ const setupAgent = new RealtimeAgent({
 ══════════════════════════════════════════════════════ */
 
 type CompanyInfo = { name: string; address?: string; city?: string; phone?: string; found?: boolean; contactNaam?: string }
-type Msg = { role: 'user' | 'ai'; text: string; streaming?: boolean }
+type Msg = { role: 'user' | 'ai'; text: string; streaming?: boolean; image_url?: string }
+
+/* ── WAV encoder (PCM 16-bit mono) ──────────────────────────────────────── */
+function encodeWav(decoded: AudioBuffer): ArrayBuffer {
+  const samples = decoded.getChannelData(0)
+  const pcm     = new Int16Array(samples.length)
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]))
+    pcm[i]  = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+  const dataLen = pcm.byteLength
+  const buf     = new ArrayBuffer(44 + dataLen)
+  const view    = new DataView(buf)
+  const write   = (off: number, str: string) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)) }
+  write(0, 'RIFF'); view.setUint32(4, 36 + dataLen, true)
+  write(8, 'WAVE'); write(12, 'fmt ')
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true); view.setUint32(24, decoded.sampleRate, true)
+  view.setUint32(28, decoded.sampleRate * 2, true)
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true)
+  write(36, 'data'); view.setUint32(40, dataLen, true)
+  new Int16Array(buf, 44).set(pcm)
+  return buf
+}
 
 function useCallTimer(active: boolean) {
   const [secs, setSecs] = useState(0)
@@ -458,6 +501,13 @@ function CompanyCard({ info, stage }: { info: CompanyInfo | null; stage: DemoSta
 /* ══════════════════════════════════════════════════════
    PAGE
 ══════════════════════════════════════════════════════ */
+const SUGGESTIONS = [
+  'Risottini in Amsterdam',
+  'Bezoek loggen',
+  'Taak aanmaken',
+  'Briefing opvragen',
+]
+
 export default function SuusPage() {
   const [msgs,         setMsgs]         = useState<Msg[]>([])
   const [input,        setInput]        = useState('')
@@ -467,6 +517,11 @@ export default function SuusPage() {
   const [muted,        setMuted]        = useState(false)
   const [demoStage,    setDemoStage]    = useState<DemoStage>('lookup')
   const [company,      setCompany]      = useState<CompanyInfo | null>(null)
+  const [agentPhoto]                    = useState<string>('/suus.jpg')
+  const [dictating,      setDictating]      = useState(false)
+  const [transcribing,   setTranscribing]   = useState(false)
+  const [pendingImage,   setPendingImage]   = useState<{ url: string; base64: string } | null>(null)
+  const [attachOpen,     setAttachOpen]     = useState(false)
 
   const sessionRef        = useRef<RealtimeSession | null>(null)
   const streamingRef      = useRef(false)
@@ -480,9 +535,40 @@ export default function SuusPage() {
   const callAudioCtxRef   = useRef<AudioContext | null>(null)
   const callAnimFrameRef  = useRef<number>(0)
   const localStreamRef    = useRef<MediaStream | null>(null)
+  const dictRecorderRef   = useRef<MediaRecorder | null>(null)
+  const dictAnalyserRef   = useRef<AnalyserNode | null>(null)
+  const dictAudioCtxRef   = useRef<AudioContext | null>(null)
+  const dictAnimFrameRef  = useRef<number>(0)
+  const dictBarsRef       = useRef<(HTMLDivElement | null)[]>([])
+  const imageInputRef     = useRef<HTMLInputElement>(null)
+  const attachRef         = useRef<HTMLDivElement>(null)
   const timer             = useCallTimer(callStatus === 'active')
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
+
+  /* Close attach dropdown on outside click */
+  useEffect(() => {
+    if (!attachOpen) return
+    const h = (e: MouseEvent) => {
+      if (attachRef.current && !attachRef.current.contains(e.target as Node)) setAttachOpen(false)
+    }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [attachOpen])
+
+  /* Paste image from clipboard */
+  useEffect(() => {
+    const h = (e: ClipboardEvent) => {
+      const item = Array.from(e.clipboardData?.items ?? []).find(i => i.type.startsWith('image/'))
+      if (!item) return
+      const file = item.getAsFile(); if (!file) return
+      const r = new FileReader()
+      r.onload = ev => { const url = ev.target?.result as string; setPendingImage({ url, base64: url }) }
+      r.readAsDataURL(file)
+    }
+    window.addEventListener('paste', h)
+    return () => window.removeEventListener('paste', h)
+  }, [])
 
   /* Wire bridge into component */
   useEffect(() => {
@@ -544,7 +630,7 @@ export default function SuusPage() {
           outputModalities: ['audio'],
           audio: {
             input: {
-              transcription: { model: 'gpt-4o-transcribe' },
+              transcription: { model: 'gpt-4o-transcribe', language: 'nl' },
               turnDetection: {
                 type: 'server_vad', threshold: 0.5,
                 prefixPaddingMs: 300, silenceDurationMs: 900,
@@ -654,7 +740,7 @@ export default function SuusPage() {
       setTimeout(() => {
         session.transport.sendEvent({
           type: 'session.update',
-          session: { input_audio_transcription: { model: 'gpt-4o-transcribe' } },
+          session: { input_audio_transcription: { model: 'gpt-4o-transcribe', language: 'nl' } },
         })
         setTimeout(() => session.transport.sendEvent({ type: 'response.create' }), 100)
       }, 300)
@@ -674,16 +760,107 @@ export default function SuusPage() {
     const next = !muted; s.mute(next); setMuted(next)
   }
 
+  /* Dictation */
+  function stopDictVisualizer() {
+    cancelAnimationFrame(dictAnimFrameRef.current)
+    dictAnalyserRef.current = null
+    dictAudioCtxRef.current?.close()
+    dictAudioCtxRef.current = null
+  }
+
+  async function startDictate() {
+    try {
+      const stream   = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const audioCtx = new AudioContext()
+      dictAudioCtxRef.current = audioCtx
+      const source   = audioCtx.createMediaStreamSource(stream)
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.6
+      source.connect(analyser)
+      dictAnalyserRef.current = analyser
+      const dataArray = new Uint8Array(analyser.frequencyBinCount)
+      const allChunks: Blob[] = []
+
+      const drawBars = () => {
+        if (!dictAnalyserRef.current) return
+        dictAnalyserRef.current.getByteFrequencyData(dataArray)
+        dictBarsRef.current.forEach((bar, i) => {
+          if (!bar) return
+          const v = dataArray[Math.min(Math.floor((i / dictBarsRef.current.length) * dataArray.length), dataArray.length - 1)] / 255
+          bar.style.height = `${3 + v * 30}px`
+        })
+        dictAnimFrameRef.current = requestAnimationFrame(drawBars)
+      }
+      drawBars()
+
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')  ? 'audio/mp4' : ''
+      const mr = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), audioBitsPerSecond: 128000 })
+      mr.ondataavailable = e => { if (e.data.size > 0) allChunks.push(e.data) }
+      mr.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop())
+        const blobType   = mr.mimeType || mimeType || 'audio/webm'
+        const blob       = new Blob(allChunks, { type: blobType })
+        let finalBlob    = blob, fileName = 'recording.webm'
+        try {
+          const ab      = await blob.arrayBuffer()
+          const decoded = await audioCtx.decodeAudioData(ab)
+          const wavBuf  = encodeWav(decoded)
+          finalBlob = new Blob([wavBuf], { type: 'audio/wav' }); fileName = 'recording.wav'
+        } catch { /* fallback */ }
+        stopDictVisualizer()
+        setTranscribing(true)
+        try {
+          const fd  = new FormData(); fd.append('audio', finalBlob, fileName)
+          const res = await fetch('/api/transcribe', { method: 'POST', body: fd })
+          const data = await res.json() as { text?: string }
+          if (data.text) {
+            setInput(prev => prev ? `${prev} ${data.text}` : data.text!)
+            setTimeout(resizeTextarea, 0)
+            textareaRef.current?.focus()
+          }
+        } catch { /* ignore */ } finally { setTranscribing(false) }
+      }
+      mr.start(100); dictRecorderRef.current = mr; setDictating(true)
+    } catch { alert('Microfoon toegang vereist.') }
+  }
+
+  function stopDictate() {
+    dictRecorderRef.current?.stop()
+    dictRecorderRef.current = null
+    setDictating(false)
+  }
+
+  function cancelDictate() {
+    if (dictRecorderRef.current) {
+      dictRecorderRef.current.ondataavailable = null
+      dictRecorderRef.current.onstop = null
+      dictRecorderRef.current.stop()
+      dictRecorderRef.current = null
+    }
+    stopDictVisualizer()
+    setDictating(false); setTranscribing(false)
+  }
+
+  function onImageFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]; if (!file) return
+    const r = new FileReader()
+    r.onload = ev => { const url = ev.target?.result as string; setPendingImage({ url, base64: url }) }
+    r.readAsDataURL(file)
+    e.target.value = ''; setAttachOpen(false)
+  }
+
   /* Text chat */
   function resizeTextarea() {
     const el = textareaRef.current; if (!el) return
     el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 160) + 'px'
   }
 
-  const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim()) return
-    setInput(''); setTimeout(resizeTextarea, 0)
-    setMsgs(p => [...p, { role: 'user', text }, { role: 'ai', text: '', streaming: true }])
+  const sendMessage = useCallback(async (text: string, imageUrl?: string) => {
+    if (!text.trim() && !imageUrl) return
+    setInput(''); setPendingImage(null); setTimeout(resizeTextarea, 0)
+    setMsgs(p => [...p, { role: 'user', text, image_url: imageUrl }, { role: 'ai', text: '', streaming: true }])
     try {
       const res = await fetch('/api/suus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) })
       if (!res.ok || !res.body) throw new Error()
@@ -700,81 +877,116 @@ export default function SuusPage() {
     }
   }, [])
 
-  const hasContent   = !!input.trim()
+  const hasContent   = !!(input.trim() || pendingImage)
   const callIsActive = callStatus !== 'idle'
+
+  function orbState() {
+    if (callStatus === 'connecting') return 'connecting' as const
+    if (agentTalking) return 'speaking' as const
+    if (userTalking)  return 'listening' as const
+    return 'idle' as const
+  }
 
   /* Render */
   return (
-    <div className="flex flex-col bg-bg flex-1 overflow-hidden">
+    <div className="flex flex-col bg-bg flex-1 overflow-hidden" style={{ height: 'calc(100svh - var(--nav-height, 0px))' }}>
 
-      {/* Call bar */}
-      <div className="flex items-center justify-between px-5 py-2.5 border-b border-border flex-shrink-0">
-        <span className="text-[12px] text-muted font-medium">
-          {callIsActive ? (agentTalking ? 'Süüs spreekt…' : userTalking ? 'Luistert…' : 'Gesprek actief') : 'Spraak-demo'}
-        </span>
-        <button
-          onClick={toggleCall}
-          className={cn(
-            'inline-flex items-center gap-1.5 px-3.5 py-2 text-[12px] font-semibold rounded-full transition-all',
-            callIsActive ? 'bg-red-500/10 text-red-500 hover:bg-red-500/15' : 'bg-primary text-white hover:opacity-85',
-          )}
-        >
-          <Phone size={13} strokeWidth={2} />
-          {callStatus === 'connecting' ? 'Verbinden…' : callIsActive ? `Ophangen  ${timer}` : 'Bellen'}
-        </button>
+      {/* ── Top pill button ── */}
+      <div className="flex-shrink-0 px-4 pt-3 pb-1">
+        <div className="max-w-[760px] mx-auto flex justify-end">
+          <button
+            onClick={toggleCall}
+            className={cn(
+              'inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[12px] font-medium rounded-full transition-all shadow-sm',
+              callIsActive
+                ? 'bg-red-600 text-white hover:bg-red-700'
+                : 'bg-primary text-white hover:opacity-85',
+            )}
+          >
+            <Phone size={13} strokeWidth={2} />
+            {callStatus === 'connecting' ? 'Verbinden…' : callIsActive ? `Ophangen ${timer}` : 'Bellen'}
+          </button>
+        </div>
       </div>
 
       {/* Company card */}
-      <div className="flex-shrink-0 pt-2">
+      <div className="flex-shrink-0">
         <CompanyCard info={company} stage={demoStage} />
       </div>
 
-      {/* Message feed */}
-      <div className="flex-1 overflow-y-auto [scrollbar-width:thin] [scrollbar-color:theme(colors.border)_transparent]">
-        <div className="max-w-[680px] mx-auto px-4 pt-4 pb-4 flex flex-col max-sm:px-3">
+      {/* ── Message feed ── */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden [scrollbar-width:thin] [scrollbar-color:theme(colors.border)_transparent]">
+        <div className="max-w-[720px] mx-auto w-full px-4 sm:px-6 pt-8 pb-4 flex flex-col">
 
-          {msgs.length === 0 && callIsActive && (
-            <div className="flex flex-col items-center gap-3 pt-8 pb-4 animate-fade-up">
-              <VoiceOrb
-                state={callStatus === 'connecting' ? 'connecting' : agentTalking ? 'speaking' : userTalking ? 'listening' : 'idle'}
-                size={72}
-              />
-              <p className="text-[13px] text-muted">
-                {callStatus === 'connecting' ? 'Verbinden…' : agentTalking ? 'Süüs spreekt…' : userTalking ? 'Luisteren…' : 'Zeg iets…'}
-              </p>
+          {/* Empty state */}
+          {msgs.length === 0 && (
+            <div className="flex flex-col items-center gap-5 pt-16 pb-8 animate-fade-up">
+              <VoiceOrb state={callIsActive ? orbState() : 'idle'} size={100} imageSrc={agentPhoto} />
+              <div className="text-center">
+                <h2 className="text-[22px] font-bold tracking-tight text-primary mb-1 max-sm:text-lg">
+                  Hoi! Ik ben Suus.
+                </h2>
+                <p className="text-[13px] text-muted">
+                  {callIsActive
+                    ? (callStatus === 'connecting' ? 'Verbinden…' : agentTalking ? 'Suus spreekt…' : userTalking ? 'Luisteren…' : 'Zeg iets…')
+                    : 'Start een gesprek of typ een vraag'}
+                </p>
+              </div>
+              {!callIsActive && (
+                <div className="grid grid-cols-2 gap-2 w-full max-w-[420px]">
+                  {SUGGESTIONS.map((s, i) => (
+                    <button
+                      key={i}
+                      onClick={() => sendMessage(s)}
+                      className="px-3.5 py-2.5 rounded-[10px] border border-border bg-surface text-xs font-medium text-primary text-left leading-snug transition-colors hover:bg-active"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
+          {/* Messages */}
           {msgs.map((m, i) => (
-            <div key={i} className="py-1 animate-msg-in">
+            <div key={i} className="py-2 animate-msg-in">
               {m.role === 'user' ? (
                 <div className="flex justify-end">
-                  <div className={cn(
-                    'text-[14px] leading-[1.65] max-w-[75%] whitespace-pre-wrap break-words px-3.5 py-2 rounded-2xl shadow-card',
-                    m.streaming ? 'text-muted bg-active' : 'text-[#0d0d0d] bg-white',
-                  )}>
-                    {m.text}{m.streaming && <TypingDots />}
+                  <div className="max-w-[75%] max-sm:max-w-[85%]">
+                    <p className="text-[11px] font-bold text-primary mb-1 text-right">Jij</p>
+                    <div className="text-[14.5px] leading-[1.6] text-muted whitespace-pre-wrap break-words bg-white px-5 py-3 rounded-[22px] shadow-card">
+                      {m.image_url && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={m.image_url} alt="bijlage" className="max-w-[200px] max-h-[150px] rounded-lg object-cover block mb-1.5" />
+                      )}
+                      {m.text}{m.streaming && <TypingDots />}
+                    </div>
                   </div>
                 </div>
               ) : (
-                <div className="flex gap-2 items-start max-w-[85%]">
-                  <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <span className="text-[9px] font-black text-primary">S</span>
+                <div className="flex gap-3 items-start">
+                  <div className="flex-shrink-0 mt-0.5">
+                    <VoiceOrb state={m.streaming ? orbState() : 'idle'} size={28} imageSrc={agentPhoto} />
                   </div>
-                  <div className="text-[14px] leading-[1.65] text-[#1a1a1a]">
-                    {m.streaming ? (
-                      <span className="whitespace-pre-wrap break-words">{m.text}<TypingDots /></span>
-                    ) : (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          p:      ({children}) => <p className="mb-1.5 last:mb-0">{children}</p>,
-                          strong: ({children}) => <strong className="font-semibold">{children}</strong>,
-                          ul:     ({children}) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children}</ul>,
-                          li:     ({children}) => <li>{children}</li>,
-                        }}
-                      >{m.text}</ReactMarkdown>
-                    )}
+                  <div className="min-w-0 max-w-[520px]">
+                    <p className="text-[11px] font-bold text-primary mb-1">Suus</p>
+                    <div className="text-[14.5px] leading-[1.6] text-[#1a1a1a]">
+                      {m.streaming ? (
+                        <span className="whitespace-pre-wrap break-words">{m.text}<TypingDots /></span>
+                      ) : (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            p:      ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
+                            strong: ({children}) => <strong className="font-semibold text-primary">{children}</strong>,
+                            ul:     ({children}) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
+                            ol:     ({children}) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
+                            li:     ({children}) => <li className="leading-[1.6]">{children}</li>,
+                          }}
+                        >{m.text}</ReactMarkdown>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -785,56 +997,147 @@ export default function SuusPage() {
         </div>
       </div>
 
-      {/* Input bar */}
-      <div className="px-4 pb-[max(16px,env(safe-area-inset-bottom))] pt-2 flex-shrink-0 border-t border-border">
-        <div className="max-w-[680px] mx-auto">
-          <div className="flex items-center gap-2 px-4 py-3 border border-border rounded-[24px] bg-surface shadow-[0_2px_12px_rgba(0,0,0,.06)]">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={e => { setInput(e.target.value); resizeTextarea() }}
-              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input) } }}
-              placeholder="Stel een vraag of bel SUUS…"
-              rows={1}
-              className="flex-1 resize-none border-none bg-transparent text-[15px] text-primary outline-none leading-[1.5] max-h-32 overflow-y-auto p-0 font-[inherit] placeholder:text-muted"
-            />
-            <div className="flex items-center gap-1.5 flex-shrink-0">
-              {callIsActive && (
-                <>
-                  <VoiceOrb
-                    state={callStatus === 'connecting' ? 'connecting' : agentTalking ? 'speaking' : userTalking ? 'listening' : 'idle'}
-                    size={24}
-                  />
-                  <button
-                    onClick={toggleMute}
-                    className={cn(
-                      'w-8 h-8 rounded-full flex items-center justify-center transition-colors',
-                      muted ? 'bg-red-100 text-red-500' : 'text-muted hover:text-primary',
-                    )}
-                  >
-                    {muted ? <MicOff size={14} /> : <Mic size={14} />}
-                  </button>
-                  <button onClick={toggleCall} className="flex items-center gap-1.5 pl-2.5 pr-3 h-8 bg-[#007AFF] text-white rounded-full text-[12px] font-semibold hover:opacity-90">
-                    <div className="flex items-center gap-[2px]">
-                      {[0,1,2].map(i => (
-                        <div key={i} ref={el => { callBarsRef.current[i] = el }}
-                          className="w-[2.5px] rounded-full bg-white transition-[height] duration-75" style={{ height: '3px' }} />
-                      ))}
-                    </div>
-                    {timer}
-                  </button>
-                </>
-              )}
-              {!callIsActive && (
-                <button
-                  onClick={() => { if (hasContent) sendMessage(input); else toggleCall() }}
-                  className="w-8 h-8 rounded-full bg-primary text-white flex items-center justify-center hover:opacity-85 transition-opacity"
-                >
-                  {hasContent ? <ArrowUp size={16} strokeWidth={2.5} /> : <AudioLines size={16} strokeWidth={2} />}
-                </button>
-              )}
-            </div>
+      {/* ── Image preview ── */}
+      {pendingImage && (
+        <div className="max-w-[760px] mx-auto px-4 pb-1.5 flex items-center gap-2">
+          <div className="relative inline-block">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={pendingImage.url} alt="preview" className="h-11 w-11 object-cover rounded-lg border border-border" />
+            <button
+              onClick={() => setPendingImage(null)}
+              className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center border-none cursor-pointer"
+            >
+              <X size={9} />
+            </button>
           </div>
+          <span className="text-[11px] text-muted">Afbeelding bijgevoegd</span>
+        </div>
+      )}
+
+      {/* ── Input bar ── */}
+      <div className="px-4 pb-[max(16px,env(safe-area-inset-bottom))] pt-2 flex-shrink-0 border-t border-border">
+        <div className="max-w-[760px] mx-auto">
+
+          {(dictating || transcribing) && !callIsActive ? (
+            /* Waveform bar during dictation */
+            <div className="flex items-center gap-3 px-4 py-4 border border-border rounded-[28px] bg-surface shadow-[0_2px_12px_rgba(0,0,0,.07)]">
+              <div className="flex-1 flex items-center justify-center gap-[2px] h-9 overflow-hidden">
+                {Array.from({ length: 72 }, (_, i) => (
+                  <div
+                    key={i}
+                    ref={el => { dictBarsRef.current[i] = el }}
+                    className={cn('w-[3px] rounded-full origin-center transition-[height] duration-75',
+                      transcribing ? 'bg-muted/40' : 'bg-primary')}
+                    style={{ height: '3px' }}
+                  />
+                ))}
+              </div>
+              <button onClick={cancelDictate} title="Annuleer"
+                className="w-9 h-9 rounded-full flex items-center justify-center text-muted hover:text-red-500 transition-colors flex-shrink-0 border-none bg-transparent cursor-pointer">
+                <X size={18} strokeWidth={2} />
+              </button>
+              <button onClick={stopDictate} disabled={transcribing} title="Stop en transcribeer"
+                className="w-9 h-9 rounded-full bg-primary text-white flex items-center justify-center hover:opacity-85 transition-opacity disabled:opacity-40 flex-shrink-0 border-none cursor-pointer">
+                <Check size={16} strokeWidth={2.5} />
+              </button>
+            </div>
+          ) : (
+            /* Normal input pill */
+            <div className="flex items-center gap-3 px-4 py-4 border border-border rounded-[28px] bg-surface shadow-[0_2px_12px_rgba(0,0,0,.07),0_0_0_1px_rgba(0,0,0,.03)] hover:shadow-[0_4px_18px_rgba(0,0,0,.1)] transition-shadow">
+
+              {/* Paperclip / attach */}
+              <input ref={imageInputRef} type="file" accept="image/*" onChange={onImageFile} className="hidden" />
+              <div className="relative flex-shrink-0" ref={attachRef}>
+                {attachOpen && (
+                  <div className="absolute bottom-[calc(100%+8px)] left-0 bg-surface border border-border rounded-[12px] shadow-[0_4px_20px_rgba(0,0,0,.12)] overflow-hidden min-w-[140px] z-50">
+                    <button
+                      className="flex items-center gap-2 px-3.5 py-2.5 text-xs font-medium text-primary w-full hover:bg-active transition-colors border-none bg-transparent cursor-pointer"
+                      onClick={() => imageInputRef.current?.click()}
+                    >
+                      <ImageIcon size={13} className="text-muted" /> Afbeelding
+                    </button>
+                  </div>
+                )}
+                <button
+                  onClick={() => setAttachOpen(p => !p)}
+                  title="Bijlage"
+                  className={cn('w-8 h-8 rounded-full flex items-center justify-center text-muted hover:text-primary transition-colors border-none bg-transparent cursor-pointer', pendingImage && 'text-primary')}
+                >
+                  <Plus size={22} strokeWidth={1.5} />
+                </button>
+              </div>
+
+              {/* Textarea */}
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={e => { setInput(e.target.value); resizeTextarea() }}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input, pendingImage?.base64) } }}
+                placeholder="Vraag Suus iets…"
+                rows={1}
+                autoComplete="off"
+                spellCheck={false}
+                className="flex-1 resize-none border-none bg-transparent text-[16px] text-primary outline-none leading-[1.55] max-h-40 overflow-y-auto p-0 font-[inherit] placeholder:text-muted"
+              />
+
+              {/* Right icons */}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {callIsActive ? (
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button
+                      onClick={toggleMute}
+                      className={cn(
+                        'w-8 h-8 rounded-full flex items-center justify-center transition-colors border-none bg-transparent cursor-pointer',
+                        muted ? 'bg-red-100 text-red-500' : 'text-muted hover:text-primary',
+                      )}
+                    >
+                      {muted ? <MicOff size={15} /> : <Mic size={15} />}
+                    </button>
+                    <VoiceOrb state={orbState()} size={28} imageSrc={agentPhoto} />
+                    <button
+                      onClick={toggleCall}
+                      className="inline-flex items-center gap-2 pl-3 pr-4 h-9 bg-[#007AFF] text-white rounded-full hover:opacity-90 transition-opacity border-none cursor-pointer"
+                    >
+                      <div className="flex items-center gap-[2.5px]">
+                        {[0, 1, 2].map(j => (
+                          <div
+                            key={j}
+                            ref={el => { callBarsRef.current[j] = el }}
+                            className="w-[3px] rounded-full bg-white transition-[height] duration-75"
+                            style={{ height: (agentTalking || userTalking) ? `${6 + j * 4}px` : '3px' }}
+                          />
+                        ))}
+                      </div>
+                      <span className="text-[13px] font-semibold">
+                        {callStatus === 'connecting' ? 'Verbinden…' : `Ophangen ${timer}`}
+                      </span>
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      onClick={startDictate}
+                      title="Dicteer bericht"
+                      className="w-9 h-9 rounded-full flex items-center justify-center text-muted hover:text-primary transition-colors border-none bg-transparent cursor-pointer"
+                    >
+                      <Mic size={20} strokeWidth={1.5} />
+                    </button>
+                    <button
+                      onClick={() => { if (hasContent) sendMessage(input, pendingImage?.base64); else toggleCall() }}
+                      title={hasContent ? 'Versturen (Enter)' : 'Gesprek starten'}
+                      className="w-9 h-9 rounded-full bg-primary text-white flex items-center justify-center hover:opacity-85 transition-opacity border-none cursor-pointer"
+                    >
+                      {hasContent ? <ArrowUp size={17} strokeWidth={2.5} /> : <AudioLines size={17} strokeWidth={2} />}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          <p className="text-center text-[11px] text-muted mt-2 opacity-60 tracking-tight">
+            Suus kan fouten maken. Controleer altijd belangrijke informatie.
+          </p>
         </div>
       </div>
     </div>
