@@ -530,7 +530,7 @@ export default function SuusPage() {
                 prefixPaddingMs: 300, silenceDurationMs: 900,
               },
             },
-            output: { voice: 'shimmer' },
+            output: { voice: 'marin' },
           },
         },
       })

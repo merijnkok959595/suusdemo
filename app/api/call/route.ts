@@ -63,7 +63,7 @@ export async function POST() {
           model:        'gpt-realtime-1.5',
           instructions: VOICE_SYSTEM,
           audio: {
-            output: { voice: 'shimmer' },
+            output: { voice: 'marin' },
           },
         },
       }),
