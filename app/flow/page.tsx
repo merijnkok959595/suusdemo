@@ -48,7 +48,7 @@ function Arrow({ dir = 'down', label }: { dir?: 'down' | 'right'; label?: string
   )
 }
 
-function Branch({ label, color = 'default', children }: {
+function Branch({ label, color, children }: {
   label: string
   color?: 'green' | 'orange'
   children: React.ReactNode
