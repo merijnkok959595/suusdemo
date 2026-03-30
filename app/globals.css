@@ -1,0 +1,189 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base layer overrides ───────────────────────────────────────── */
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  :root {
+    --nav-height: 80px;
+    /* Keep CSS vars for the handful of places that still use them during migration */
+    --bg:              #F7F6F3;
+    --surface:         #FFFFFF;
+    --border:          #E8E6E0;
+    --text:            #1a1a1a;
+    --label-secondary: #333333;
+    --muted:           #6B7280;
+    --subtle:          #9CA3AF;
+    --active:          #F3F2EF;
+    --brand:           #7C3AED;
+    --brand-rgb:       124, 58, 237;
+    --brand-subtle:    #F5F0FF;
+  }
+
+  html, body {
+    @apply h-full font-sans bg-bg text-primary antialiased overflow-x-hidden;
+  }
+
+  input, textarea, select, button {
+    font-family: inherit;
+  }
+}
+
+/* ── Component layer — shared UI patterns ───────────────────────── */
+@layer components {
+  /* Form field — font-size 16px on mobile prevents iOS auto-zoom on focus */
+  .field-input {
+    @apply w-full px-3 py-2.5 text-sm text-primary bg-surface border border-border rounded-lg
+           outline-none transition-shadow duration-150
+           focus:ring-2 focus:ring-black/10 focus:border-primary/40
+           placeholder:text-muted;
+    font-size: 16px;
+  }
+  @media (min-width: 640px) {
+    .field-input { font-size: 14px; }
+  }
+
+  /* Primary button */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5 px-4 py-2.5
+           text-sm font-semibold text-white bg-primary rounded-lg
+           transition-opacity duration-150 hover:opacity-90
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* Ghost / secondary button */
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 px-4 py-2.5
+           text-sm font-semibold text-primary bg-transparent border border-border rounded-lg
+           transition-colors duration-150 hover:bg-active
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  /* Icon button */
+  .btn-icon {
+    @apply inline-flex items-center justify-center w-8 h-8
+           rounded-lg border-none bg-transparent text-muted
+           transition-colors duration-150 hover:bg-active hover:text-primary;
+  }
+
+  /* Card container */
+  .card {
+    @apply bg-surface border border-border rounded-xl shadow-card overflow-hidden;
+  }
+
+  /* Section within a card */
+  .card-section {
+    @apply px-4 py-3 border-b border-border last:border-b-0;
+  }
+}
+
+/* ── Utilities ───────────────────────────────────────────────────── */
+@layer utilities {
+  .safe-bottom    { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+  .pb-safe-bottom { padding-bottom: max(64px, env(safe-area-inset-bottom)); }
+}
+
+/* ── NavBar (global — rendered in layout) ────────────────────────── */
+.roux-nav {
+  position: sticky; top: 0; z-index: 100; height: 80px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 24px; gap: 0;
+}
+@media (max-width: 639px) {
+  :root { --nav-height: 56px; }
+  .roux-nav { height: 56px; padding: 0 16px; }
+}
+.roux-nav-logo {
+  font-size: 13px; font-weight: 800; color: var(--text);
+  letter-spacing: -0.02em; text-decoration: none;
+  margin-right: 28px; flex-shrink: 0;
+}
+@media (max-width: 639px) {
+  .roux-nav-logo { margin-right: 0; }
+}
+
+/* ── Mobile menu animation ──────────────────────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up { animation: fade-up 0.15s ease; }
+.roux-nav-items { display: flex; align-items: stretch; height: 100%; gap: 2px; }
+.roux-nav-item {
+  display: flex; align-items: center; padding: 0 12px; height: 100%;
+  font-size: 13px; font-weight: 400; color: var(--muted);
+  text-decoration: none; position: relative; transition: color 0.12s; white-space: nowrap;
+}
+.roux-nav-item::after {
+  content: ''; position: absolute; bottom: 0; left: 8px; right: 8px;
+  height: 2px; border-radius: 2px 2px 0 0; background: var(--text);
+  opacity: 0; transform: scaleX(0.4); transition: opacity 0.12s, transform 0.12s;
+}
+.roux-nav-item:hover { color: var(--text); }
+.roux-nav-item.active { color: var(--text); font-weight: 600; }
+.roux-nav-item.active::after { opacity: 1; transform: scaleX(1); }
+
+/* ── react-phone-number-input ─────────────────────────────────────── */
+.PhoneInput {
+  display: flex; align-items: stretch;
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  background: var(--surface); height: 40px;
+}
+.PhoneInput:focus-within {
+  outline: 2px solid rgba(0,0,0,0.12); outline-offset: 0;
+  border-color: rgba(0,0,0,0.35);
+}
+.PhoneInputCountry {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  padding: 0 10px 0 12px; background: var(--active);
+  border-right: 1px solid var(--border); flex-shrink: 0;
+  font-size: 13px; font-weight: 600; color: var(--text);
+  cursor: pointer !important; user-select: none;
+  min-width: 72px;
+}
+.PhoneInputCountry * { cursor: pointer !important; }
+.PhoneInputCountrySelect {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  border: none; background: transparent;
+  -webkit-appearance: none; appearance: none;
+}
+.PhoneInputCountrySelect:focus { outline: none; }
+.PhoneInputCountrySelectArrow {
+  display: inline-block; width: 4px; height: 4px;
+  border-right: 1.5px solid var(--text-muted); border-bottom: 1.5px solid var(--text-muted);
+  border-top: none; border-left: none;
+  transform: rotate(45deg); margin-top: -3px; opacity: 0.5; flex-shrink: 0;
+}
+.PhoneInputCountryIcon {
+  display: flex; align-items: center; line-height: 1; flex-shrink: 0;
+}
+.PhoneInputCountryIcon--square { width: 22px; height: 15px; border-radius: 2px; overflow: hidden; }
+.PhoneInputCountryIcon img, .PhoneInputCountryIcon svg { display: block; width: 100%; height: 100%; }
+.PhoneInputInput {
+  flex: 1; min-width: 0; padding: 0 12px;
+  font-size: 16px; color: var(--text); background: transparent;
+  border: none; outline: none; height: 100%;
+}
+@media (min-width: 640px) {
+  .PhoneInputInput { font-size: 14px; }
+}
+.PhoneInputInput::placeholder { color: var(--text-muted, #aaa); }
+
+/* ── Google Places autocomplete (injected into <body> by Google) ─── */
+.pac-container {
+  z-index: 100000 !important; font-family: inherit !important;
+  margin-top: 4px; border-radius: 7px;
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 32px rgba(16,13,30,.12); background: var(--surface);
+}
+.pac-item {
+  padding: 8px 10px; font-size: 13px; line-height: 1.35;
+  color: var(--text); border-top: 1px solid var(--border);
+  touch-action: manipulation; cursor: pointer;
+}
+.pac-item:first-child { border-top: none; }
+.pac-item:hover, .pac-item-selected { background: var(--active); }
+/* Ensure pac-container doesn't get hidden by iOS blur-before-tap */
+.pac-container:after { display: none; }
