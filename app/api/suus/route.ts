@@ -83,26 +83,35 @@ export async function POST(req: Request) {
                 try { briefingPayload = JSON.stringify(JSON.parse(result)) } catch { /* ignore */ }
               }
               if (tc.name === 'google_zoek_adres') {
-                try {
-                  const p = JSON.parse(result)
-                  if (p?.naam || p?.name)    companyState.name    = p.naam ?? p.name
-                  if (p?.adres || p?.address) companyState.address = p.adres ?? p.address
-                  if (p?.city || p?.stad)     companyState.city    = p.city ?? p.stad
-                  if (p?.telefoon || p?.phone) companyState.phone  = p.telefoon ?? p.phone
-                } catch { /* ignore */ }
+                // Returns text, not JSON. Parse the Tag: line.
+                // Format: Tag: [google: naam=X|adres=Y|stad=Z|postcode=P|tel=T]
+                const tagMatch = result.match(/Tag:\s*\[google:([^\]]+)\]/)
+                if (tagMatch) {
+                  const pairs: Record<string, string> = {}
+                  tagMatch[1].split('|').forEach(pair => {
+                    const [k, ...v] = pair.split('=')
+                    if (k && v.length) pairs[k.trim()] = v.join('=').trim()
+                  })
+                  if (pairs.naam)     companyState.name    = pairs.naam
+                  if (pairs.adres)    companyState.address = pairs.adres
+                  if (pairs.stad)     companyState.city    = pairs.stad
+                  if (pairs.tel)      companyState.phone   = pairs.tel
+                }
               }
               if (tc.name === 'contact_zoek') {
                 try {
-                  const parsed   = JSON.parse(result)
-                  const contacts = parsed?.contacts ?? (parsed?.contact ? [parsed.contact] : null)
-                  if (contacts?.length) contactsPayload = JSON.stringify({ contacts })
-                  // Enrich company state with CRM data
-                  const first = contacts?.[0] ?? parsed?.contact
-                  if (first) {
-                    companyState.found       = parsed?.found !== false
-                    companyState.contactNaam = [first.firstName, first.lastName].filter(Boolean).join(' ') || first.naam || undefined
-                    if (!companyState.name)  companyState.name = first.companyName ?? first.company_name ?? companyState.name
-                    if (!companyState.city)  companyState.city = first.city ?? undefined
+                  const parsed  = JSON.parse(result)
+                  const contact = parsed?.contact
+                  if (parsed?.found && contact) {
+                    companyState.found       = true
+                    companyState.contactNaam = contact.naam || undefined
+                    if (!companyState.name)    companyState.name    = contact.bedrijf || undefined
+                    if (!companyState.address) companyState.address = contact.adres   || undefined
+                    if (!companyState.city)    companyState.city    = contact.stad    || undefined
+                    if (!companyState.phone)   companyState.phone   = contact.telefoon || undefined
+                  } else if (parsed?.found === false) {
+                    companyState.found = false
+                    if (!companyState.name) companyState.name = parsed.bedrijf_gezocht || undefined
                   }
                 } catch { /* ignore */ }
               }
@@ -110,8 +119,8 @@ export async function POST(req: Request) {
                 try {
                   const p = JSON.parse(result)
                   companyState.found       = false
-                  companyState.contactNaam = p.firstName ?? p.first_name ?? undefined
-                  if (!companyState.name)  companyState.name = p.companyName ?? p.company_name ?? undefined
+                  companyState.contactNaam = p.first_name ?? p.firstName ?? undefined
+                  if (!companyState.name)  companyState.name = p.company_name ?? p.companyName ?? undefined
                 } catch { /* ignore */ }
               }
 

@@ -73,10 +73,10 @@ export const SETUP_INSTRUCTIONS = `${BASE_RULES}
   {
     "id": "5_crm_found",
     "instructions": [
-      "Zeg in één zin wie er gevonden is, bv: 'Ik heb [naam] gevonden in ons systeem.'",
-      "Roep DIRECT EN ONMIDDELLIJK transfer_to_acties aan — ZONDER te wachten op gebruikersinput."
+      "Roep DIRECT transfer_to_acties aan — ZEG NIETS, geen bevestigingszin, geen pauze.",
+      "De actiesAgent kondigt de overdracht zelf aan."
     ],
-    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct na de bevestigingszin" }]
+    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Zodra contact gevonden" }]
   },
   {
     "id": "5_crm_create_vragen",
@@ -94,10 +94,10 @@ export const SETUP_INSTRUCTIONS = `${BASE_RULES}
     "id": "5_crm_create_aanmaken",
     "instructions": [
       "Roep contact_create aan met: bedrijfsnaam, plaatsnaam, voornaam, email, telefoon én klantType.",
-      "Zeg daarna kort: '[naam] aangemaakt als [lead/klant].'",
-      "Roep DIRECT EN ONMIDDELLIJK transfer_to_acties aan — ZONDER te wachten op gebruikersinput."
+      "Roep DIRECT daarna transfer_to_acties aan — ZEG NIETS, geen bevestigingszin.",
+      "De actiesAgent kondigt de aanmaak zelf aan."
     ],
-    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct na de bevestigingszin" }]
+    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct na contact_create" }]
   }
 ]
 
@@ -113,10 +113,13 @@ Het contact is al gevonden of aangemaakt in de vorige stap — zie de conversati
 Gebruik het contactId uit het resultaat van contact_zoek of contact_create voor ALLE tool-aanroepen.
 Je hoeft NOOIT opnieuw naar het bedrijf of contactId te vragen — het staat al in de conversatie.
 
-Zeg ALTIJD bij de overdracht én na elke afgeronde actie exact:
-"Wat wil je doen? Bezoek loggen, briefing, notitie, agenda of taak?"
+BIJ OVERDRACHT (eerste bericht van deze agent):
+Zeg in één zin wie gevonden/aangemaakt is én direct het menu, bv:
+"[Naam] gevonden. Wat wil je doen? Bezoek loggen, briefing, notitie, agenda of taak?"
+of bij aanmaken: "[Naam] aangemaakt als [lead/klant]. Wat wil je doen? Bezoek loggen, briefing, notitie, agenda of taak?"
+
+NA ELKE ACTIE: stel dezelfde menuvraaag opnieuw: "Wat wil je doen? Bezoek loggen, briefing, notitie, agenda of taak?"
 Noem ALTIJD alle vijf opties — nooit minder, nooit een open vraag zonder opties.
-Na elke actie: stel dezelfde vraag opnieuw met alle vijf opties.
 
 Als de gebruiker een ander bedrijf of contact wil opzoeken: roep DIRECT transfer_to_setup aan.
 Voorbeelden: "ik wil een ander contact", "zoek even [bedrijfsnaam]", "we gaan naar [ander bedrijf]".
