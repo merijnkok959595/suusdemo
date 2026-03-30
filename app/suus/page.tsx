@@ -124,15 +124,18 @@ const contact_zoek_tool = tool({
     if (contactId) Object.assign(_collected, { contactId, crmStatus: found ? 'found' : undefined, contactNaam })
     if (found) {
       _bridge.company?.({ found: true, contactNaam })
-      const card: CompanyInfo = {
-        name:        getField(result, 'bedrijf', 'company_name', 'companyName') ?? _collected.naam ?? args.bedrijfsnaam,
-        address:     getField(result, 'adres', 'address') ?? _collected.adres,
-        city:        getField(result, 'stad', 'city') ?? args.plaatsnaam,
-        phone:       getField(result, 'telefoon', 'phone') ?? _collected.telefoon,
-        contactNaam,
-        found:       true,
-      }
-      _bridge.companyMsg?.(card)
+      // Inject company card into chat — delayed so session handoff isn't blocked
+      setTimeout(() => {
+        const card: CompanyInfo = {
+          name:        getField(result, 'bedrijf', 'company_name', 'companyName') ?? _collected.naam ?? args.bedrijfsnaam,
+          address:     getField(result, 'adres', 'address') ?? _collected.adres,
+          city:        getField(result, 'stad', 'city') ?? args.plaatsnaam,
+          phone:       getField(result, 'telefoon', 'phone') ?? _collected.telefoon,
+          contactNaam,
+          found:       true,
+        }
+        _bridge.companyMsg?.(card)
+      }, 0)
     }
 
     return s
@@ -165,13 +168,15 @@ const contact_create_tool = tool({
     const contactId = getField(result, 'id', 'contactId')
     if (contactId) Object.assign(_collected, { contactId, crmStatus: 'created' })
     _bridge.company?.({ found: false })
-    const card: CompanyInfo = {
-      name:    args.bedrijfsnaam,
-      city:    args.plaatsnaam,
-      contactNaam: args.voornaam,
-      found:   false,
-    }
-    _bridge.companyMsg?.(card)
+    setTimeout(() => {
+      const card: CompanyInfo = {
+        name:        args.bedrijfsnaam,
+        city:        args.plaatsnaam,
+        contactNaam: args.voornaam,
+        found:       false,
+      }
+      _bridge.companyMsg?.(card)
+    }, 0)
     return typeof result === 'string' ? result : JSON.stringify(result)
   },
 })

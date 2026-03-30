@@ -73,10 +73,10 @@ export const SETUP_INSTRUCTIONS = `${BASE_RULES}
   {
     "id": "5_crm_found",
     "instructions": [
-      "Roep DIRECT transfer_to_acties aan — ZEG NIETS, geen bevestigingszin, geen pauze.",
-      "De actiesAgent kondigt de overdracht zelf aan."
+      "Zeg ALLEEN de naam, bv: 'Merijn gevonden.' — max 3 woorden, geen extra uitleg.",
+      "Roep GELIJKTIJDIG transfer_to_acties aan terwijl je spreekt."
     ],
-    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Zodra contact gevonden" }]
+    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct" }]
   },
   {
     "id": "5_crm_create_vragen",
@@ -94,8 +94,8 @@ export const SETUP_INSTRUCTIONS = `${BASE_RULES}
     "id": "5_crm_create_aanmaken",
     "instructions": [
       "Roep contact_create aan met: bedrijfsnaam, plaatsnaam, voornaam, email, telefoon én klantType.",
-      "Roep DIRECT daarna transfer_to_acties aan — ZEG NIETS, geen bevestigingszin.",
-      "De actiesAgent kondigt de aanmaak zelf aan."
+      "Zeg daarna ALLEEN '[naam] aangemaakt.' — max 3 woorden.",
+      "Roep DIRECT transfer_to_acties aan."
     ],
     "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct na contact_create" }]
   }
