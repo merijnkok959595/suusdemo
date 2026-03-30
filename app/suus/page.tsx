@@ -8,6 +8,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
 import { VoiceOrb } from '@/components/ui/voice-orb'
+import BriefingCard, { type BriefingData } from '@/components/BriefingCard'
+import { ExternalLink } from 'lucide-react'
 
 /* ══════════════════════════════════════════════════════
    2 AGENTS — native SDK handoffs
@@ -420,7 +422,8 @@ const setupAgent = new RealtimeAgent({
 ══════════════════════════════════════════════════════ */
 
 type CompanyInfo = { name: string; address?: string; city?: string; phone?: string; found?: boolean; contactNaam?: string }
-type Msg = { role: 'user' | 'ai'; text: string; streaming?: boolean; image_url?: string }
+type ContactCardData = { contactId: string; companyName: string | null; firstName: string | null; lastName: string | null; city: string | null; phone: string | null }
+type Msg = { role: 'user' | 'ai'; text: string; streaming?: boolean; image_url?: string; briefingData?: BriefingData; contactsData?: ContactCardData[] }
 
 /* ── WAV encoder (PCM 16-bit mono) ──────────────────────────────────────── */
 function encodeWav(decoded: AudioBuffer): ArrayBuffer {
@@ -876,13 +879,31 @@ export default function SuusPage() {
     setInput(''); setPendingImage(null); setTimeout(resizeTextarea, 0)
     setMsgs(p => [...p, { role: 'user', text, image_url: imageUrl }, { role: 'ai', text: '', streaming: true }])
     try {
-      const res = await fetch('/api/suus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) })
+      const res = await fetch('/api/suus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text || '(afbeelding)' }) })
       if (!res.ok || !res.body) throw new Error()
       const reader = res.body.getReader(); const dec = new TextDecoder(); let full = ''
       while (true) {
         const { done, value } = await reader.read(); if (done) break
         full += dec.decode(value, { stream: true })
-        setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m))
+
+        const briefingMatch = full.match(/\n__BRIEFING__:(.+)/)
+        const contactsMatch = full.match(/\n__CONTACTS__:(.+)/)
+
+        if (briefingMatch) {
+          const vis = full.replace(/\n__BRIEFING__:.+/, '').trim()
+          try {
+            const parsed = JSON.parse(briefingMatch[1]) as BriefingData
+            setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: vis, briefingData: parsed, streaming: false } : m))
+          } catch { setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: vis } : m)) }
+        } else if (contactsMatch) {
+          const vis = full.replace(/\n__CONTACTS__:.+/, '').trim()
+          try {
+            const parsed = JSON.parse(contactsMatch[1]) as { contacts: ContactCardData[] }
+            setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: vis, contactsData: parsed.contacts, streaming: false } : m))
+          } catch { setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m)) }
+        } else {
+          setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m))
+        }
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
       }
       setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, streaming: false } : m))
@@ -985,22 +1006,59 @@ export default function SuusPage() {
                   </div>
                   <div className="min-w-0 max-w-[520px]">
                     <p className="text-[11px] font-bold text-primary mb-1">Suus</p>
-                    <div className="text-[14.5px] leading-[1.6] text-[#1a1a1a]">
-                      {m.streaming ? (
-                        <span className="whitespace-pre-wrap break-words">{m.text}<TypingDots /></span>
-                      ) : (
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            p:      ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
-                            strong: ({children}) => <strong className="font-semibold text-primary">{children}</strong>,
-                            ul:     ({children}) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
-                            ol:     ({children}) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
-                            li:     ({children}) => <li className="leading-[1.6]">{children}</li>,
-                          }}
-                        >{m.text}</ReactMarkdown>
-                      )}
-                    </div>
+                    {m.text && (
+                      <div className="text-[14.5px] leading-[1.6] text-[#1a1a1a]">
+                        {m.streaming ? (
+                          <span className="whitespace-pre-wrap break-words">{m.text}<TypingDots /></span>
+                        ) : (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              p:      ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
+                              strong: ({children}) => <strong className="font-semibold text-primary">{children}</strong>,
+                              ul:     ({children}) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
+                              ol:     ({children}) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
+                              li:     ({children}) => <li className="leading-[1.6]">{children}</li>,
+                            }}
+                          >{m.text}</ReactMarkdown>
+                        )}
+                      </div>
+                    )}
+                    {!m.text && m.streaming && <TypingDots />}
+
+                    {/* Briefing card */}
+                    {m.briefingData && !m.streaming && (
+                      <div className="mt-2.5">
+                        <BriefingCard data={m.briefingData} />
+                      </div>
+                    )}
+
+                    {/* Contact selector cards */}
+                    {m.contactsData && m.contactsData.length > 0 && !m.streaming && (
+                      <div className="mt-2 flex flex-col gap-1.5 max-w-[420px]">
+                        {m.contactsData.map(c => {
+                          const name = c.companyName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Contact'
+                          const sub  = c.companyName ? [c.firstName, c.lastName].filter(Boolean).join(' ') : null
+                          return (
+                            <div key={c.contactId} className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border border-border bg-surface hover:bg-active transition-colors">
+                              <div className="flex-1 min-w-0">
+                                <div className="text-[13px] font-semibold text-primary truncate">{name}</div>
+                                {(sub || c.city) && (
+                                  <div className="text-[11px] text-muted truncate">{[sub, c.city].filter(Boolean).join(' · ')}</div>
+                                )}
+                              </div>
+                              <button
+                                onClick={() => sendMessage(`Briefing voor ${name} (contactId: ${c.contactId})`)}
+                                className="px-2.5 py-1 text-[11px] font-semibold bg-primary text-white rounded-lg border-none cursor-pointer hover:opacity-85 transition-opacity flex-shrink-0"
+                              >
+                                Briefing
+                              </button>
+                              <ExternalLink size={12} className="text-muted flex-shrink-0" />
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
