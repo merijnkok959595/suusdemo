@@ -461,7 +461,7 @@ export default function SuusPage() {
 
   /* Call */
   async function toggleCall() {
-    if (sessionRef.current) {
+    if (sessionRef.current || callStatus === 'active') {
       try { (sessionRef.current as RealtimeSession & { close?: () => void }).close?.() } catch { /* ignore */ }
       sessionRef.current = null
       localStreamRef.current?.getTracks().forEach(t => t.stop()); localStreamRef.current = null
@@ -494,7 +494,7 @@ export default function SuusPage() {
       if (!client_secret?.value) throw new Error(error ?? 'No client secret')
 
       const session = new RealtimeSession(setupAgent, {
-        model: 'gpt-4o-realtime-preview-2025-06-03',
+        model: 'gpt-4o-realtime-preview',
         config: {
           outputModalities: ['audio'],
           audio: {

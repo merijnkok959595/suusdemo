@@ -60,7 +60,7 @@ export async function POST() {
       body: JSON.stringify({
         session: {
           type:         'realtime',
-          model:        'gpt-4o-realtime-preview-2025-06-03',
+          model:        'gpt-4o-realtime-preview',
           instructions: VOICE_SYSTEM,
           audio: {
             output: { voice: 'shimmer' },
