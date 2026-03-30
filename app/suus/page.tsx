@@ -41,8 +41,9 @@ type CollectedData = {
 const _collected: CollectedData = {}
 
 const _bridge = {
-  stage:   null as null | ((s: DemoStage) => void),
-  company: null as null | ((info: Partial<CompanyInfo>) => void),
+  stage:      null as null | ((s: DemoStage) => void),
+  company:    null as null | ((info: Partial<CompanyInfo>) => void),
+  companyMsg: null as null | ((info: CompanyInfo) => void),  // injects card into chat
 }
 
 /* ══════════════════════════════════════════════════════
@@ -121,7 +122,18 @@ const contact_zoek_tool = tool({
     const contactNaam = getField(result, 'naam', 'name')
 
     if (contactId) Object.assign(_collected, { contactId, crmStatus: found ? 'found' : undefined, contactNaam })
-    if (found) _bridge.company?.({ found: true, contactNaam })
+    if (found) {
+      _bridge.company?.({ found: true, contactNaam })
+      const card: CompanyInfo = {
+        name:        getField(result, 'bedrijf', 'company_name', 'companyName') ?? _collected.naam ?? args.bedrijfsnaam,
+        address:     getField(result, 'adres', 'address') ?? _collected.adres,
+        city:        getField(result, 'stad', 'city') ?? args.plaatsnaam,
+        phone:       getField(result, 'telefoon', 'phone') ?? _collected.telefoon,
+        contactNaam,
+        found:       true,
+      }
+      _bridge.companyMsg?.(card)
+    }
 
     return s
   },
@@ -153,6 +165,13 @@ const contact_create_tool = tool({
     const contactId = getField(result, 'id', 'contactId')
     if (contactId) Object.assign(_collected, { contactId, crmStatus: 'created' })
     _bridge.company?.({ found: false })
+    const card: CompanyInfo = {
+      name:    args.bedrijfsnaam,
+      city:    args.plaatsnaam,
+      contactNaam: args.voornaam,
+      found:   false,
+    }
+    _bridge.companyMsg?.(card)
     return typeof result === 'string' ? result : JSON.stringify(result)
   },
 })
@@ -428,9 +447,10 @@ export default function SuusPage() {
 
   /* Wire bridge into component */
   useEffect(() => {
-    _bridge.stage   = (s) => setDemoStage(s)
-    _bridge.company = (info) => setCompany(prev => ({ ...(prev ?? { name: '' }), ...info }))
-    return () => { _bridge.stage = null; _bridge.company = null }
+    _bridge.stage      = (s) => setDemoStage(s)
+    _bridge.company    = (info) => setCompany(prev => ({ ...(prev ?? { name: '' }), ...info }))
+    _bridge.companyMsg = (info) => setMsgs(p => [...p, { role: 'ai', text: '', companyData: info }])
+    return () => { _bridge.stage = null; _bridge.company = null; _bridge.companyMsg = null }
   }, [])
 
   /* Visualizer */
@@ -799,10 +819,6 @@ export default function SuusPage() {
         </div>
       </div>
 
-      {/* Company card */}
-      <div className="flex-shrink-0">
-        <CompanyCard info={company} stage={demoStage} />
-      </div>
 
       {/* ── Message feed ── */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden [scrollbar-width:thin] [scrollbar-color:theme(colors.border)_transparent]">
