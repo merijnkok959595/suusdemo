@@ -73,10 +73,10 @@ export const SETUP_INSTRUCTIONS = `${BASE_RULES}
   {
     "id": "5_crm_found",
     "instructions": [
-      "Zeg ALLEEN de naam, bv: 'Merijn gevonden.' — max 3 woorden, geen extra uitleg.",
-      "Roep GELIJKTIJDIG transfer_to_acties aan terwijl je spreekt."
+      "Zeg EXACT: '[naam] gevonden, één moment.' — niets meer, niets minder.",
+      "Roep daarna DIRECT transfer_to_acties aan."
     ],
-    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct" }]
+    "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct na de zin" }]
   },
   {
     "id": "5_crm_create_vragen",
@@ -94,8 +94,8 @@ export const SETUP_INSTRUCTIONS = `${BASE_RULES}
     "id": "5_crm_create_aanmaken",
     "instructions": [
       "Roep contact_create aan met: bedrijfsnaam, plaatsnaam, voornaam, email, telefoon én klantType.",
-      "Zeg daarna ALLEEN '[naam] aangemaakt.' — max 3 woorden.",
-      "Roep DIRECT transfer_to_acties aan."
+      "Zeg EXACT: '[naam] aangemaakt, één moment.' — niets meer, niets minder.",
+      "Roep daarna DIRECT transfer_to_acties aan."
     ],
     "transitions": [{ "next_step": "transfer_to_acties", "condition": "Direct na contact_create" }]
   }
