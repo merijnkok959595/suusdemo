@@ -519,7 +519,7 @@ export default function SuusPage() {
       if (!client_secret?.value) throw new Error(error ?? 'No client secret')
 
       const session = new RealtimeSession(setupAgent, {
-        model: 'gpt-4o-realtime-preview',
+        model: 'gpt-realtime-1.5',
         config: {
           outputModalities: ['audio'],
           audio: {
