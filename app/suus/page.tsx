@@ -545,8 +545,6 @@ export default function SuusPage() {
           if (agentName === 'acties') {
             setDemoStage('acties')
             _bridge.stage?.('acties')
-            // Trigger actiesAgent to speak its opening message
-            setTimeout(() => session.transport.sendEvent({ type: 'response.create' }), 150)
           } else if (agentName === 'setup') {
             // Nieuw contact — reset UI en _collected
             Object.keys(_collected).forEach(k => delete (_collected as Record<string, unknown>)[k])
