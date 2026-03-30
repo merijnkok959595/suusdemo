@@ -42,21 +42,37 @@ export const SETUP_INSTRUCTIONS = `${BASE_RULES}
     "id": "2_search",
     "instructions": [
       "Roep DIRECT google_zoek_adres aan met de bedrijfsnaam en plaatsnaam.",
-      "Wacht op het echte resultaat — zeg NIETS voor je het hebt."
+      "Wacht op het echte resultaat — zeg NIETS voor je het hebt.",
+      "Max 2 pogingen per bedrijfsnaam. Na 2x niet gevonden: ga naar stap 3_confirm_skip."
     ],
     "transitions": [
-      { "next_step": "3_confirm", "condition": "Adres gevonden" },
-      { "next_step": "2_search",  "condition": "Niet gevonden — zeg: 'Ik kan dat niet vinden. Kun je het nog eens duidelijk uitspreken? Je mag het ook spellen.' en zoek opnieuw" }
+      { "next_step": "3_confirm",      "condition": "Adres gevonden" },
+      { "next_step": "2_search",       "condition": "Niet gevonden, 1e poging — zeg: 'Ik kan dat niet vinden. Kun je het nog eens duidelijk uitspreken of spellen?' en zoek opnieuw met gecorrigeerde naam" },
+      { "next_step": "3_confirm_skip", "condition": "Niet gevonden na 2e poging — ga verder zonder adres" }
     ]
   },
   {
     "id": "3_confirm",
     "instructions": [
-      "Deel het gevonden adres en vraag of het klopt."
+      "Deel het gevonden adres kortaf en vraag of het klopt.",
+      "Als de gebruiker NEE zegt EN direct een ander bedrijf of stad noemt: gebruik die nieuwe naam — sla 1_greeting over en zoek DIRECT opnieuw (terug naar 2_search).",
+      "Als de gebruiker alleen NEE zegt zonder nieuw bedrijf: vraag 'Welk bedrijf en welke plaats bedoel je?'"
     ],
     "transitions": [
       { "next_step": "4_crm",    "condition": "Gebruiker bevestigt dat het klopt" },
-      { "next_step": "2_search", "condition": "Klopt niet — roep google_zoek_adres opnieuw aan" }
+      { "next_step": "2_search", "condition": "Gebruiker geeft een ander bedrijf/stad op — zoek direct opnieuw" },
+      { "next_step": "1_greeting", "condition": "Gebruiker zegt alleen nee — vraag opnieuw" }
+    ]
+  },
+  {
+    "id": "3_confirm_skip",
+    "instructions": [
+      "Zeg: 'Ik kan het adres niet vinden, maar ik zoek het contact op in het CRM.'",
+      "Roep DIRECT contact_zoek aan met de bedrijfsnaam en plaatsnaam."
+    ],
+    "transitions": [
+      { "next_step": "5_crm_found",         "condition": "Contact gevonden" },
+      { "next_step": "5_crm_create_vragen", "condition": "Contact niet gevonden" }
     ]
   },
   {
