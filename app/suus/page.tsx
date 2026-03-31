@@ -404,6 +404,7 @@ export default function SuusPage() {
   const [attachOpen,     setAttachOpen]     = useState(false)
 
   const sessionRef        = useRef<RealtimeSession | null>(null)
+  const agentRespondingRef = useRef(false)  // true while agent is generating audio
   const streamingRef      = useRef(false)
   const streamingTextRef  = useRef('')
   const userStreamRef     = useRef(false)
@@ -545,13 +546,12 @@ export default function SuusPage() {
           if (agentName === 'acties') {
             setDemoStage('acties')
             _bridge.stage?.('acties')
-            // Give SDK 300ms to update session, then trigger actiesAgent greeting
-            // Only fire if no response is already running
+            // Trigger actiesAgent to speak — alleen als er geen response loopt
             setTimeout(() => {
-              if (sessionRef.current) {
+              if (sessionRef.current && !agentRespondingRef.current) {
                 sessionRef.current.transport.sendEvent({ type: 'response.create' })
               }
-            }, 300)
+            }, 400)
           } else if (agentName === 'setup') {
             // Nieuw contact — reset UI en _collected
             Object.keys(_collected).forEach(k => delete (_collected as Record<string, unknown>)[k])
@@ -569,9 +569,9 @@ export default function SuusPage() {
           /* ── VAD ── */
           case 'input_audio_buffer.speech_started': setUserTalking(true);  break
           case 'input_audio_buffer.speech_stopped': setUserTalking(false); break
-          case 'response.output_audio.delta':       setAgentTalking(true);  break
-          case 'response.output_audio.done':
-          case 'response.done':                     setAgentTalking(false); break
+          case 'response.output_audio.delta':       setAgentTalking(true); agentRespondingRef.current = true; break
+          case 'response.output_audio.done':        setAgentTalking(false); break
+          case 'response.done':                     setAgentTalking(false); agentRespondingRef.current = false; break
 
           /* ── Agent streaming transcript ── */
           case 'response.output_audio_transcript.delta': {
@@ -637,27 +637,24 @@ export default function SuusPage() {
       sessionRef.current = session
       setCallStatus('active')
 
-      // 1. Zet VAD tijdelijk UIT zodat de begroeting niet onderbroken kan worden
-      // 2. Start transcriptie + eerste begroeting
-      // 3. Na response.done: zet VAD terug aan
+      // Stap 1: VAD UIT + transcriptie aan — SDK triggert zelf de eerste begroeting
       setTimeout(() => {
         session.transport.sendEvent({
           type: 'session.update',
           session: {
             input_audio_transcription: { model: 'gpt-4o-transcribe', language: 'nl' },
-            turn_detection: null, // VAD uit tijdens begroeting
+            turn_detection: null, // VAD uit: begroeting niet interruptable
           },
         })
-        setTimeout(() => {
-          session.transport.sendEvent({ type: 'response.create' })
-        }, 100)
-      }, 300)
+      }, 200)
 
-      // Zodra de begroeting klaar is, zet VAD weer aan
+      // Stap 2: Na eerste response.done → VAD aan (gebruiker kan nu praten)
+      let greetingDone = false
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const enableVadAfterGreeting = (ev: any) => {
-        if (ev.type === 'response.done') {
-          session.transport.off('*', enableVadAfterGreeting)
+      const onFirstResponseDone = (ev: any) => {
+        if (ev.type === 'response.done' && !greetingDone) {
+          greetingDone = true
+          session.transport.off('*', onFirstResponseDone)
           session.transport.sendEvent({
             type: 'session.update',
             session: {
@@ -671,7 +668,7 @@ export default function SuusPage() {
           })
         }
       }
-      session.transport.on('*', enableVadAfterGreeting)
+      session.transport.on('*', onFirstResponseDone)
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
