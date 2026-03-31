@@ -23,6 +23,11 @@ const config: Config = {
         secondary: '#333333',
         muted:     '#6B7280',
         subtle:    '#9CA3AF',
+        // SaaS-kit semantic aliases (used by MiniCard + new AI page)
+        copy:        '#1a1a1a',
+        'copy-muted':   '#6B7280',
+        'copy-subtle':  '#9CA3AF',
+        'border-app':   '#E8E6E0',
       },
       fontFamily: {
         sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],

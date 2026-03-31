@@ -77,6 +77,17 @@
   .card-section {
     @apply px-4 py-3 border-b border-border last:border-b-0;
   }
+
+  /* MiniCard — CRM feedback cards streamed inline in chat */
+  .mini-card {
+    @apply flex items-start gap-3 px-4 py-3 bg-surface border border-border-app rounded-[14px] shadow-card max-w-[420px];
+  }
+  .mini-card-icon {
+    @apply w-9 h-9 rounded-[10px] bg-active flex items-center justify-center shrink-0 mt-0.5;
+  }
+  .mini-card-btn {
+    @apply mt-2 inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-white bg-copy hover:bg-black rounded-lg px-2.5 py-1 no-underline transition-colors cursor-pointer border-none;
+  }
 }
 
 /* ── Utilities ───────────────────────────────────────────────────── */

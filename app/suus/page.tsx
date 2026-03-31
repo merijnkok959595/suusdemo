@@ -3,56 +3,66 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { RealtimeAgent, RealtimeSession, tool } from '@openai/agents/realtime'
 import { z } from 'zod'
-import { ArrowUp, Mic, MicOff, AudioLines, Phone, MapPin, Building2, Loader2, X, Plus, ImageIcon, Check } from 'lucide-react'
+import { ArrowUp, Mic, MicOff, AudioLines, X, Plus, ImageIcon, Check, MapPin } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
 import { VoiceOrb } from '@/components/ui/voice-orb'
 import BriefingCard, { type BriefingData } from '@/components/BriefingCard'
-import { ExternalLink } from 'lucide-react'
-import { normalizeEmail, normalizePhone } from '@/lib/suus-tools'
-import { SETUP_INSTRUCTIONS, ACTIES_INSTRUCTIONS } from '@/lib/suus-prompts'
+import { MiniCardList, type MiniCardData } from '@/components/ui/MiniCard'
+import { buildSetupInstructions, buildActiesInstructions, type VoiceOrgContext } from '@/lib/ai/voice-prompts'
 
-/* ══════════════════════════════════════════════════════
-   2 AGENTS — native SDK handoffs
-   setupAgent  →  actiesAgent
-   setupAgent: begroeting + google + CRM (éénmalig)
-   actiesAgent: alle acties, loopt door de rest van het gesprek
-══════════════════════════════════════════════════════ */
+/* ─── Types ────────────────────────────────────────────────────────────────── */
 
 type DemoStage = 'lookup' | 'crm' | 'acties'
 
-type CollectedData = {
+type CompanyInfo = {
+  name:        string
+  address?:    string
+  city?:       string
+  phone?:      string
+  found?:      boolean
+  contactNaam?: string
+  contactId?:  string
+}
+
+type ContactCardData = {
+  contactId:   string
+  companyName: string | null
+  firstName:   string | null
+  lastName:    string | null
+  city:        string | null
+  phone:       string | null
+}
+
+type Msg = {
+  role:          'user' | 'ai'
+  text:          string
+  streaming?:    boolean
+  image_url?:    string
+  briefingData?: BriefingData
+  contactsData?: ContactCardData[]
+  companyData?:  CompanyInfo
+  cards?:        MiniCardData[]
+}
+
+type Collected = {
   bedrijfsnaam?: string
   plaatsnaam?:   string
-  naam?:         string   // Google-verified bedrijfsnaam
+  naam?:         string
   adres?:        string
   telefoon?:     string
   contactId?:    string
-  contactNaam?:  string   // Voornaam + achternaam uit CRM
+  contactNaam?:  string
   crmStatus?:    'found' | 'created'
 }
 
+/* ─── Tool execution helper ─────────────────────────────────────────────────── */
 
-/* ══════════════════════════════════════════════════════
-   SHARED STATE — module-level, groeit door alle stages
-══════════════════════════════════════════════════════ */
-
-const _collected: CollectedData = {}
-
-const _bridge = {
-  stage:      null as null | ((s: DemoStage) => void),
-  company:    null as null | ((info: Partial<CompanyInfo>) => void),
-  companyMsg: null as null | ((info: CompanyInfo) => void),  // injects card into chat
-}
-
-/* ══════════════════════════════════════════════════════
-   HELPERS
-══════════════════════════════════════════════════════ */
-
-async function callMcp(name: string, args: Record<string, unknown>): Promise<unknown> {
-  const res = await fetch('/api/suus/tool-call', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+async function callVoiceTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  const res = await fetch('/api/ai/voice-tool', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, args }),
   })
   const { result } = await res.json()
@@ -63,245 +73,251 @@ function getField(r: unknown, ...keys: string[]): string | undefined {
   try {
     const obj = typeof r === 'string' ? JSON.parse(r) : r
     for (const key of keys) {
-      const val = (obj as Record<string, unknown>)?.[key]
-        ?? (obj as Record<string, Record<string, unknown>>)?.contact?.[key]
-        ?? (obj as Record<string, Record<string, unknown>>)?.data?.[key]
+      const val =
+        (obj as Record<string, unknown>)?.[key] ??
+        (obj as Record<string, Record<string, unknown>>)?.contact?.[key] ??
+        (obj as Record<string, Record<string, unknown>>)?.data?.[key]
       if (typeof val === 'string' && val) return val
     }
   } catch { /* ignore */ }
   return undefined
 }
 
-/* ══════════════════════════════════════════════════════
-   TOOLS — gegroepeerd per agent
-══════════════════════════════════════════════════════ */
+/* ─── Tool factories ─────────────────────────────────────────────────────── */
 
-const google_zoek_adres_tool = tool({
-  name: 'google_zoek_adres',
-  description: `Zoek bedrijfsadres via Google Places. Verplicht aanroepen — nooit raden.
-Parameters:
-- bedrijfsnaam: ALLEEN de bedrijfsnaam, geen voorzetsels ("uit", "in", "te", "van")
-- plaatsnaam: ALLEEN de plaatsnaam, geen voorzetsels
+function makeSetupTools(
+  collected: Collected,
+  companyMsg: (info: CompanyInfo) => void,
+  stageSet:   (s: DemoStage) => void,
+) {
+  return [
+    tool({
+      name: 'contact_enrich',
+      description: `Zoek bedrijfsadres via Google Places. Verplicht aanroepen — nooit raden.
+Geef query als "bedrijfsnaam plaatsnaam", bijv. "Risottini Amsterdam".`,
+      parameters: z.object({
+        query: z.string().describe('Bedrijfsnaam + plaatsnaam'),
+      }),
+      execute: async (args) => {
+        stageSet('lookup')
+        Object.assign(collected, { bedrijfsnaam: args.query })
+        const result = await callVoiceTool('contact_enrich', args as Record<string, unknown>)
+        let parsed: Record<string, unknown> | null = null
+        try { parsed = typeof result === 'string' ? JSON.parse(result) : result as Record<string, unknown> } catch { /* ignore */ }
+        const naam     = (parsed?.name as string | undefined) ?? collected.bedrijfsnaam
+        const adres    = parsed?.address as string | undefined
+        const telefoon = parsed?.phone as string | undefined
+        Object.assign(collected, { naam, adres, telefoon })
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
 
-Voorbeelden:
-- "risottini uit amsterdam" → bedrijfsnaam="risottini", plaatsnaam="Amsterdam"
-- "bakker en zonen in rotterdam" → bedrijfsnaam="bakker en zonen", plaatsnaam="Rotterdam"`,
-  parameters: z.object({ bedrijfsnaam: z.string(), plaatsnaam: z.string().optional() }),
-  execute: async (args) => {
-    _bridge.stage?.('lookup')
-    _bridge.company?.({ name: args.bedrijfsnaam, city: args.plaatsnaam })
-    Object.assign(_collected, { bedrijfsnaam: args.bedrijfsnaam, plaatsnaam: args.plaatsnaam })
-
-    const result = await callMcp('google_zoek_adres', args as Record<string, unknown>)
-
-    const naam     = getField(result, 'naam', 'name') ?? args.bedrijfsnaam
-    const adres    = getField(result, 'adres', 'address')
-    const telefoon = getField(result, 'telefoon', 'phone')
-
-    Object.assign(_collected, { naam, adres, telefoon })
-    _bridge.company?.({ name: naam, address: adres })
-
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
-
-const contact_zoek_tool = tool({
-  name: 'contact_zoek',
-  description: 'Zoek een contact op in het CRM. Verplicht aanroepen — nooit raden.',
-  parameters: z.object({ bedrijfsnaam: z.string(), plaatsnaam: z.string().optional() }),
-  execute: async (args) => {
-    _bridge.stage?.('crm')
-    const result = await callMcp('contact_zoek', args as Record<string, unknown>)
-    const s      = typeof result === 'string' ? result : JSON.stringify(result)
-
-    let parsed: Record<string, unknown> | null = null
-    try { parsed = JSON.parse(s) } catch { /* ignore */ }
-
-    const found       = parsed?.found === true || parsed?.contact !== undefined
-    const contactId   = getField(result, 'id', 'contactId', 'contact_id')
-    const contactNaam = getField(result, 'naam', 'name')
-
-    if (contactId) Object.assign(_collected, { contactId, crmStatus: found ? 'found' : undefined, contactNaam })
-    if (found) {
-      _bridge.company?.({ found: true, contactNaam })
-      // Inject company card into chat — delayed so session handoff isn't blocked
-      setTimeout(() => {
-        const card: CompanyInfo = {
-          name:        getField(result, 'bedrijf', 'company_name', 'companyName') ?? _collected.naam ?? args.bedrijfsnaam,
-          address:     getField(result, 'adres', 'address') ?? _collected.adres,
-          city:        getField(result, 'stad', 'city') ?? args.plaatsnaam,
-          phone:       getField(result, 'telefoon', 'phone') ?? _collected.telefoon,
-          contactNaam,
-          found:       true,
+    tool({
+      name: 'contact_search',
+      description: 'Zoek een contact op in het CRM. Verplicht aanroepen — nooit raden.',
+      parameters: z.object({
+        query: z.string().describe('Bedrijfsnaam + stad'),
+      }),
+      execute: async (args) => {
+        stageSet('crm')
+        const result = await callVoiceTool('contact_search', args as Record<string, unknown>)
+        const s      = typeof result === 'string' ? result : JSON.stringify(result)
+        let parsed: Record<string, unknown> | null = null
+        try { parsed = JSON.parse(s) } catch { /* ignore */ }
+        const found    = !!(parsed && Number(parsed.count) > 0)
+        const contacts = parsed?.contacts as Record<string, unknown>[] | undefined
+        const first    = contacts?.[0]
+        const contactId   = (first?.id ?? first?.contactId) as string | undefined
+        const contactNaam = first?.naam as string | undefined
+        const bedrijf     = first?.bedrijf as string | undefined
+        if (contactId) Object.assign(collected, { contactId, crmStatus: found ? 'found' : undefined, contactNaam })
+        if (found && first) {
+          companyMsg({
+            name:        bedrijf ?? collected.naam ?? args.query,
+            address:     collected.adres,
+            city:        first.stad as string | undefined,
+            phone:       (first.phone as string | undefined) ?? collected.telefoon,
+            contactNaam,
+            found:       true,
+            contactId,
+          })
         }
-        _bridge.companyMsg?.(card)
-      }, 0)
-    }
+        return s
+      },
+    }),
 
-    return s
-  },
-})
+    tool({
+      name: 'contact_create',
+      description: 'Maak een nieuw contact aan in het CRM.',
+      parameters: z.object({
+        companyName: z.string(),
+        city:        z.string().optional(),
+        firstName:   z.string().optional(),
+        email:       z.string().optional(),
+        phone:       z.string().optional(),
+        type:        z.enum(['lead', 'customer']),
+      }),
+      execute: async (args) => {
+        const result    = await callVoiceTool('contact_create', args as Record<string, unknown>)
+        const contactId = getField(result, 'id', 'contactId')
+        if (contactId) Object.assign(collected, { contactId, crmStatus: 'created' })
+        companyMsg({
+          name:        args.companyName,
+          city:        args.city,
+          contactNaam: args.firstName,
+          found:       false,
+          contactId,
+        })
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
+  ]
+}
 
+function makeActiesTools(
+  collected: Collected,
+  cardMsg: (card: MiniCardData) => void,
+) {
+  return [
+    tool({
+      name: 'contact_briefing',
+      description: 'Geeft volledige briefing van een contact: notities, taken, afspraken.',
+      parameters: z.object({ contactId: z.string() }),
+      execute: async (args) => {
+        const result = await callVoiceTool('contact_briefing', args as Record<string, unknown>)
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
 
-const contact_create_tool = tool({
-  name: 'contact_create',
-  description: 'Maak een nieuw contact aan in het CRM.',
-  parameters: z.object({
-    bedrijfsnaam: z.string(),
-    plaatsnaam:   z.string().optional(),
-    voornaam:     z.string().optional(),
-    email:        z.string().optional(),
-    telefoon:     z.string().optional(),
-    klantType:    z.enum(['Lead', 'Klant']),
-  }),
-  execute: async (args) => {
-    // Map naar veldnamen die de Edge Function verwacht
-    const payload: Record<string, unknown> = {
-      company_name: args.bedrijfsnaam,
-      city:         args.plaatsnaam,
-      first_name:   args.voornaam,
-      email:        normalizeEmail(args.email),
-      phone:        normalizePhone(args.telefoon),
-      type:         args.klantType === 'Klant' ? 'customer' : 'lead',
-    }
-    const result    = await callMcp('contact_create', payload)
-    const contactId = getField(result, 'id', 'contactId')
-    if (contactId) Object.assign(_collected, { contactId, crmStatus: 'created' })
-    _bridge.company?.({ found: false })
-    setTimeout(() => {
-      const card: CompanyInfo = {
-        name:        args.bedrijfsnaam,
-        city:        args.plaatsnaam,
-        contactNaam: args.voornaam,
-        found:       false,
-      }
-      _bridge.companyMsg?.(card)
-    }, 0)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+    tool({
+      name: 'contact_update',
+      description: 'Wijzig velden van een bestaand contact.',
+      parameters: z.object({
+        contactId:   z.string(),
+        companyName: z.string().optional(),
+        type:        z.enum(['lead', 'customer']).optional(),
+      }),
+      execute: async (args) => {
+        const result = await callVoiceTool('contact_update', args as Record<string, unknown>)
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
 
-const contact_briefing_tool = tool({
-  name: 'contact_briefing',
-  description: 'Geeft volledige briefing van een contact.',
-  parameters: z.object({ contactId: z.string() }),
-  execute: async (args) => {
-    const result = await callMcp('contact_briefing', args as Record<string, unknown>)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+    tool({
+      name: 'note_create',
+      description: 'Voeg een notitie toe aan een contact.',
+      parameters: z.object({ contactId: z.string(), body: z.string() }),
+      execute: async (args) => {
+        const result = await callVoiceTool('note_create', args as Record<string, unknown>)
+        const parsed = typeof result === 'string' ? (() => { try { return JSON.parse(result) } catch { return null } })() : result
+        if (parsed?.success && parsed?.id) {
+          const raw     = String(args.body)
+          const snippet = (raw.charAt(0).toUpperCase() + raw.slice(1)).slice(0, 60) + (raw.length > 60 ? '…' : '')
+          cardMsg({ type: 'note', id: parsed.id, title: snippet, contactId: String(args.contactId), subtitle: collected.contactNaam })
+        }
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
 
-const contact_update_tool = tool({
-  name: 'contact_update',
-  description: 'Wijzig velden van een bestaand contact.',
-  parameters: z.object({
-    contactId: z.string(), bedrijfsnaam: z.string().optional(),
-    klantType: z.enum(['Lead', 'Klant']).optional(),
-  }),
-  execute: async (args) => {
-    const result = await callMcp('contact_update', args as Record<string, unknown>)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+    tool({
+      name: 'task_create',
+      description: 'Maak een taak aan voor een contact.',
+      parameters: z.object({
+        contactId: z.string(),
+        title:     z.string(),
+        body:      z.string().optional(),
+        dueDate:   z.string().describe('ISO 8601 datum'),
+      }),
+      execute: async (args) => {
+        const result = await callVoiceTool('task_create', args as Record<string, unknown>)
+        const parsed = typeof result === 'string' ? (() => { try { return JSON.parse(result) } catch { return null } })() : result
+        if (parsed?.success && parsed?.id) {
+          const due = args.dueDate ? new Date(String(args.dueDate)).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' }) : undefined
+          cardMsg({ type: 'task', id: parsed.id, title: String(args.title), contactId: String(args.contactId), subtitle: collected.contactNaam, meta: due })
+        }
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
 
-const note_create_tool = tool({
-  name: 'note_create',
-  description: 'Voeg een notitie toe aan een contact.',
-  parameters: z.object({ contactId: z.string(), body: z.string() }),
-  execute: async (args) => {
-    const result = await callMcp('note_create', args as Record<string, unknown>)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+    tool({
+      name: 'appointment_create',
+      description: 'Plan een afspraak voor een contact.',
+      parameters: z.object({
+        contactId: z.string(),
+        title:     z.string(),
+        startTime: z.string().describe('ISO 8601'),
+        endTime:   z.string().describe('ISO 8601'),
+        notes:     z.string().optional(),
+      }),
+      execute: async (args) => {
+        const result = await callVoiceTool('appointment_create', args as Record<string, unknown>)
+        const parsed = typeof result === 'string' ? (() => { try { return JSON.parse(result) } catch { return null } })() : result
+        if (parsed?.success && parsed?.id) {
+          const when = args.startTime ? new Date(String(args.startTime)).toLocaleDateString('nl-NL', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : undefined
+          cardMsg({ type: 'appointment', id: parsed.id, title: String(args.title), contactId: String(args.contactId), subtitle: collected.contactNaam, meta: when })
+        }
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
 
-const task_create_tool = tool({
-  name: 'task_create',
-  description: 'Maak een taak aan voor een contact.',
-  parameters: z.object({ contactId: z.string(), title: z.string(), body: z.string().optional(), dueDate: z.string() }),
-  execute: async (args) => {
-    const result = await callMcp('task_create', args as Record<string, unknown>)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+    tool({
+      name: 'log_bezoek',
+      description: 'Log een salesbezoek: notitie + vervolg-taak/afspraak + contact update.',
+      parameters: z.object({
+        contactId:    z.string(),
+        samenvatting: z.string(),
+        vervolgActie: z.string().optional(),
+        vervolgDatum: z.string().optional(),
+        klantType:    z.enum(['Lead', 'Klant']).optional(),
+        producten:    z.string().optional(),
+      }),
+      execute: async (args) => {
+        const result = await callVoiceTool('log_bezoek', args as Record<string, unknown>)
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
 
-const calendar_create_tool = tool({
-  name: 'calendar_create',
-  description: 'Plan een afspraak voor een contact.',
-  parameters: z.object({
-    contactId: z.string(), title: z.string(),
-    startTime: z.string(), endTime: z.string(), notes: z.string().optional(),
-  }),
-  execute: async (args) => {
-    const result = await callMcp('calendar_create', args as Record<string, unknown>)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+    tool({
+      name: 'team_member_list',
+      description: 'Haal actieve teamleden op.',
+      parameters: z.object({}),
+      execute: async (args) => {
+        const result = await callVoiceTool('team_member_list', args as Record<string, unknown>)
+        return typeof result === 'string' ? result : JSON.stringify(result)
+      },
+    }),
+  ]
+}
 
-const log_bezoek_tool = tool({
-  name: 'log_bezoek',
-  description: 'Log een salesbezoek: notitie + vervolg-taak + contact update.',
-  parameters: z.object({
-    contactId: z.string(), samenvatting: z.string(),
-    vervolgActie: z.string().optional(), vervolgDatum: z.string().optional(),
-    klantType: z.enum(['Lead', 'Klant']).optional(), producten: z.string().optional(),
-  }),
-  execute: async (args) => {
-    const result = await callMcp('log_bezoek', args as Record<string, unknown>)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+/* ─── Agents ─────────────────────────────────────────────────────────────── */
 
-const get_team_members_tool = tool({
-  name: 'get_team_members',
-  description: 'Haal teamleden op.',
-  parameters: z.object({}),
-  execute: async (args) => {
-    const result = await callMcp('get_team_members', args as Record<string, unknown>)
-    return typeof result === 'string' ? result : JSON.stringify(result)
-  },
-})
+function createAgents(
+  orgCtx:      VoiceOrgContext,
+  setupTools:  ReturnType<typeof tool>[],
+  actiesTools: ReturnType<typeof tool>[],
+) {
+  const actiesAgent: RealtimeAgent = new RealtimeAgent({
+    name: 'acties',
+    handoffDescription: 'Agent voor alle CRM-acties: bezoek loggen, notitie, taak, afspraak, briefing.',
+    instructions: buildActiesInstructions(orgCtx),
+    tools: actiesTools,
+    handoffs: [],
+  })
 
-/* ══════════════════════════════════════════════════════
-   2 AGENTS met native handoffs
-   actiesAgent eerst definieren (geen circulaire deps nodig)
-══════════════════════════════════════════════════════ */
+  const setupAgent = new RealtimeAgent({
+    name: 'setup',
+    handoffDescription: 'Initiële agent: bedrijf identificeren via Google en contact vastleggen in CRM.',
+    instructions: buildSetupInstructions(orgCtx),
+    tools: setupTools,
+    handoffs: [actiesAgent],
+  })
 
-const actiesAgent = new RealtimeAgent({
-  name: 'acties',
-  handoffDescription: 'Agent voor alle CRM-acties: bezoek loggen, notitie, taak, afspraak, briefing.',
-  instructions: ACTIES_INSTRUCTIONS,
-  tools: [
-    contact_briefing_tool,
-    contact_update_tool,
-    note_create_tool,
-    task_create_tool,
-    calendar_create_tool,
-    log_bezoek_tool,
-    get_team_members_tool,
-  ],
-  handoffs: [],
-})
+  ;(actiesAgent.handoffs as RealtimeAgent[]).push(setupAgent)
+  return setupAgent
+}
 
-const setupAgent = new RealtimeAgent({
-  name: 'setup',
-  handoffDescription: 'Initiële agent: bedrijf identificeren via Google en contact vastleggen in CRM.',
-  instructions: SETUP_INSTRUCTIONS,
-  tools: [google_zoek_adres_tool, contact_zoek_tool, contact_create_tool],
-  handoffs: [actiesAgent],
-})
+/* ─── Helpers ────────────────────────────────────────────────────────────── */
 
-// Circulaire handoff: actiesAgent kan terug naar setupAgent voor nieuw contact
-;(actiesAgent.handoffs as RealtimeAgent[]).push(setupAgent)
-
-/* ══════════════════════════════════════════════════════
-   UI TYPES & COMPONENTS
-══════════════════════════════════════════════════════ */
-
-type CompanyInfo = { name: string; address?: string; city?: string; phone?: string; found?: boolean; contactNaam?: string }
-type ContactCardData = { contactId: string; companyName: string | null; firstName: string | null; lastName: string | null; city: string | null; phone: string | null }
-type Msg = { role: 'user' | 'ai'; text: string; streaming?: boolean; image_url?: string; briefingData?: BriefingData; contactsData?: ContactCardData[]; companyData?: CompanyInfo }
-
-/* ── WAV encoder (PCM 16-bit mono) ──────────────────────────────────────── */
 function encodeWav(decoded: AudioBuffer): ArrayBuffer {
   const samples = decoded.getChannelData(0)
   const pcm     = new Int16Array(samples.length)
@@ -312,14 +328,14 @@ function encodeWav(decoded: AudioBuffer): ArrayBuffer {
   const dataLen = pcm.byteLength
   const buf     = new ArrayBuffer(44 + dataLen)
   const view    = new DataView(buf)
-  const write   = (off: number, str: string) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)) }
-  write(0, 'RIFF'); view.setUint32(4, 36 + dataLen, true)
-  write(8, 'WAVE'); write(12, 'fmt ')
+  const w = (off: number, str: string) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)) }
+  w(0, 'RIFF'); view.setUint32(4, 36 + dataLen, true)
+  w(8, 'WAVE'); w(12, 'fmt ')
   view.setUint32(16, 16, true); view.setUint16(20, 1, true)
   view.setUint16(22, 1, true); view.setUint32(24, decoded.sampleRate, true)
   view.setUint32(28, decoded.sampleRate * 2, true)
   view.setUint16(32, 2, true); view.setUint16(34, 16, true)
-  write(36, 'data'); view.setUint32(40, dataLen, true)
+  w(36, 'data'); view.setUint32(40, dataLen, true)
   new Int16Array(buf, 44).set(pcm)
   return buf
 }
@@ -335,99 +351,107 @@ function useCallTimer(active: boolean) {
 }
 
 function TypingDots() {
-  return <span className="inline-block w-[7px] h-[1.1em] bg-primary rounded-[2px] align-middle animate-[thinkPulse_1s_ease-in-out_infinite] opacity-70" />
+  return <span className="inline-block w-[7px] h-[1.1em] bg-copy rounded-[2px] align-middle animate-[thinkPulse_1s_ease-in-out_infinite] opacity-70" />
 }
 
-function CompanyCard({ info, stage }: { info: CompanyInfo | null; stage: DemoStage }) {
-  if (!info?.name || stage === 'lookup') return null
+function ContactSelectorCards({
+  contacts, onSelect,
+}: {
+  contacts: ContactCardData[]
+  onSelect: (c: ContactCardData) => void
+}) {
   return (
-    <div className="mx-4 mb-2 animate-fade-up">
-      <div className="max-w-[720px] mx-auto">
-        <div className="flex items-start gap-3 px-4 py-3 bg-surface border border-border rounded-[14px] shadow-card">
-          <div className="w-9 h-9 rounded-[10px] bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
-            <Building2 size={17} className="text-primary" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-[14px] font-semibold text-primary">{info.name}</p>
-              {info.found !== undefined && (
-                <span className={cn(
-                  'text-[10px] font-semibold px-2 py-0.5 rounded-full',
-                  info.found ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700',
-                )}>
-                  {info.found ? '✓ Gevonden in CRM' : '+ Aangemaakt in CRM'}
-                </span>
+    <div className="mt-2 flex flex-col gap-1.5 max-w-[420px]">
+      {contacts.map(c => {
+        const name = c.companyName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Contact'
+        const sub  = c.companyName ? [c.firstName, c.lastName].filter(Boolean).join(' ') : null
+        return (
+          <div key={c.contactId} className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border border-border-app bg-surface hover:bg-active transition-colors">
+            <div className="flex-1 min-w-0">
+              <div className="text-[13px] font-semibold text-copy truncate">{name}</div>
+              {(sub || c.city) && (
+                <div className="text-[11px] text-copy-muted truncate">{[sub, c.city].filter(Boolean).join(' · ')}</div>
               )}
             </div>
-            {info.contactNaam && (
-              <p className="text-[12px] text-secondary font-medium mt-0.5">{info.contactNaam}</p>
-            )}
-            {(info.address || info.city) && (
-              <div className="flex items-center gap-1 mt-0.5">
-                <MapPin size={11} className="text-muted flex-shrink-0" />
-                <p className="text-[12px] text-muted truncate">
-                  {[info.address, info.city].filter(Boolean).join(', ')}
-                </p>
-              </div>
-            )}
+            <button
+              onClick={() => onSelect(c)}
+              className="px-2.5 py-1 text-[11px] font-semibold bg-copy text-white rounded-lg border-none cursor-pointer hover:bg-black transition-colors flex-shrink-0"
+            >
+              Gebruik
+            </button>
           </div>
-          {stage === 'crm' && <Loader2 size={16} className="text-muted animate-spin flex-shrink-0 mt-1" />}
-        </div>
-      </div>
+        )
+      })}
     </div>
   )
 }
 
-/* ══════════════════════════════════════════════════════
-   PAGE
-══════════════════════════════════════════════════════ */
-const SUGGESTIONS = [
-  'Risottini in Amsterdam',
-  'Bezoek loggen',
-  'Taak aanmaken',
-  'Briefing opvragen',
+const DEFAULT_SUGGESTIONS = [
+  'Hoeveel contacten heb ik?',
+  'Zoek contact: Risottini Amsterdam',
+  'Maak een nieuw contact aan',
+  'Briefing voor [bedrijfsnaam]',
 ]
+
+/* ─── Page ───────────────────────────────────────────────────────────────── */
 
 export default function SuusPage() {
   const [msgs,         setMsgs]         = useState<Msg[]>([])
   const [input,        setInput]        = useState('')
+  const [sessionId]                     = useState(() => crypto.randomUUID())
   const [callStatus,   setCallStatus]   = useState<'idle' | 'connecting' | 'active'>('idle')
   const [agentTalking, setAgentTalking] = useState(false)
   const [userTalking,  setUserTalking]  = useState(false)
   const [muted,        setMuted]        = useState(false)
   const [demoStage,    setDemoStage]    = useState<DemoStage>('lookup')
   const [company,      setCompany]      = useState<CompanyInfo | null>(null)
-  const [agentPhoto]                    = useState<string>('/suus.jpg')
-  const [dictating,      setDictating]      = useState(false)
-  const [transcribing,   setTranscribing]   = useState(false)
-  const [pendingImage,   setPendingImage]   = useState<{ url: string; base64: string } | null>(null)
-  const [attachOpen,     setAttachOpen]     = useState(false)
+  const [attachOpen,   setAttachOpen]   = useState(false)
+  const [pendingImage, setPendingImage] = useState<{ url: string; base64: string } | null>(null)
+  const [dictating,    setDictating]    = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [greetingDone, setGreetingDone] = useState(false)
+  const [callError,    setCallError]    = useState<string | null>(null)
+  const agentPhoto = '/suus.jpg'
 
-  const sessionRef        = useRef<RealtimeSession | null>(null)
-  const agentRespondingRef = useRef(false)  // true while agent is generating audio
-  const streamingRef      = useRef(false)
-  const streamingTextRef  = useRef('')
-  const userStreamRef     = useRef(false)
-  const userStreamTextRef = useRef('')
-  const bottomRef         = useRef<HTMLDivElement>(null)
-  const textareaRef       = useRef<HTMLTextAreaElement>(null)
-  const callBarsRef       = useRef<(HTMLDivElement | null)[]>([])
-  const callAnalyserRef   = useRef<AnalyserNode | null>(null)
-  const callAudioCtxRef   = useRef<AudioContext | null>(null)
-  const callAnimFrameRef  = useRef<number>(0)
-  const localStreamRef    = useRef<MediaStream | null>(null)
-  const dictRecorderRef   = useRef<MediaRecorder | null>(null)
-  const dictAnalyserRef   = useRef<AnalyserNode | null>(null)
-  const dictAudioCtxRef   = useRef<AudioContext | null>(null)
-  const dictAnimFrameRef  = useRef<number>(0)
-  const dictBarsRef       = useRef<(HTMLDivElement | null)[]>([])
-  const imageInputRef     = useRef<HTMLInputElement>(null)
-  const attachRef         = useRef<HTMLDivElement>(null)
-  const timer             = useCallTimer(callStatus === 'active')
+  const sessionRef           = useRef<RealtimeSession | null>(null)
+  const greetingDoneRef      = useRef(false)
+  const greetingTriggeredRef = useRef(false)
+  const streamingRef         = useRef(false)
+  const streamingTextRef     = useRef('')
+  const userStreamRef        = useRef(false)
+  const userStreamTextRef    = useRef('')
+  const localStreamRef       = useRef<MediaStream | null>(null)
+  const callAnalyserRef      = useRef<AnalyserNode | null>(null)
+  const callAudioCtxRef      = useRef<AudioContext | null>(null)
+  const callAnimFrameRef     = useRef<number>(0)
+  const callBarsRef          = useRef<(HTMLDivElement | null)[]>([])
+  const dictRecorderRef      = useRef<MediaRecorder | null>(null)
+  const dictAnalyserRef      = useRef<AnalyserNode | null>(null)
+  const dictAudioCtxRef      = useRef<AudioContext | null>(null)
+  const dictAnimFrameRef     = useRef<number>(0)
+  const dictBarsRef          = useRef<(HTMLDivElement | null)[]>([])
+  const imageInputRef        = useRef<HTMLInputElement>(null)
+  const attachRef            = useRef<HTMLDivElement>(null)
+  const bottomRef            = useRef<HTMLDivElement>(null)
+  const textareaRef          = useRef<HTMLTextAreaElement>(null)
+
+  const timer = useCallTimer(callStatus === 'active')
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
 
-  /* Close attach dropdown on outside click */
+  useEffect(() => {
+    const vv = window.visualViewport
+    if (!vv) return
+    let prevH = vv.height
+    const onResize = () => {
+      const delta = prevH - vv.height; prevH = vv.height
+      if (callStatus !== 'idle') return
+      if (delta > 150) bottomRef.current?.scrollIntoView({ behavior: 'instant' })
+    }
+    vv.addEventListener('resize', onResize)
+    return () => vv.removeEventListener('resize', onResize)
+  }, [callStatus])
+
   useEffect(() => {
     if (!attachOpen) return
     const h = (e: MouseEvent) => {
@@ -437,7 +461,6 @@ export default function SuusPage() {
     return () => document.removeEventListener('mousedown', h)
   }, [attachOpen])
 
-  /* Paste image from clipboard */
   useEffect(() => {
     const h = (e: ClipboardEvent) => {
       const item = Array.from(e.clipboardData?.items ?? []).find(i => i.type.startsWith('image/'))
@@ -451,15 +474,8 @@ export default function SuusPage() {
     return () => window.removeEventListener('paste', h)
   }, [])
 
-  /* Wire bridge into component */
-  useEffect(() => {
-    _bridge.stage      = (s) => setDemoStage(s)
-    _bridge.company    = (info) => setCompany(prev => ({ ...(prev ?? { name: '' }), ...info }))
-    _bridge.companyMsg = (info) => setMsgs(p => [...p, { role: 'ai', text: '', companyData: info }])
-    return () => { _bridge.stage = null; _bridge.company = null; _bridge.companyMsg = null }
-  }, [])
+  /* ── Visualizer ─────────────────────────────────────────────────────────── */
 
-  /* Visualizer */
   function startVisualizer(stream: MediaStream) {
     const ctx = new AudioContext(); callAudioCtxRef.current = ctx
     const an  = ctx.createAnalyser(); an.fftSize = 32; an.smoothingTimeConstant = 0.8
@@ -485,39 +501,60 @@ export default function SuusPage() {
     callAudioCtxRef.current?.close(); callAudioCtxRef.current = null
   }
 
-  /* Call */
-  async function toggleCall() {
-    if (sessionRef.current || callStatus === 'active') {
-      try { (sessionRef.current as RealtimeSession & { close?: () => void }).close?.() } catch { /* ignore */ }
-      sessionRef.current = null
-      localStreamRef.current?.getTracks().forEach(t => t.stop()); localStreamRef.current = null
-      stopVisualizer()
-      streamingRef.current = false; streamingTextRef.current = ''
-      userStreamRef.current = false; userStreamTextRef.current = ''
+  /* ── Voice call ─────────────────────────────────────────────────────────── */
 
-      // Stuur summary email
-      const snapMsgs    = msgs.filter(m => m.text?.trim())
-      const snapCompany = company
-      const snapTimer   = timer
-      if (snapMsgs.length > 0) {
-        fetch('/api/send-summary', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ msgs: snapMsgs, company: snapCompany, duration: snapTimer }),
-        }).catch(() => {/* fire and forget */})
+  function stopCall() {
+    try { (sessionRef.current as RealtimeSession & { close?: () => void }).close?.() } catch { /* ignore */ }
+    sessionRef.current = null
+    localStreamRef.current?.getTracks().forEach(t => t.stop()); localStreamRef.current = null
+    stopVisualizer()
+    streamingRef.current = false; streamingTextRef.current = ''
+    userStreamRef.current = false; userStreamTextRef.current = ''
+    greetingDoneRef.current = false; setGreetingDone(false)
+    greetingTriggeredRef.current = false
+    setCallStatus('idle'); setAgentTalking(false); setUserTalking(false); setMuted(false)
+    setDemoStage('lookup'); setCompany(null)
+    setMsgs(p => p.map(m => m.streaming ? { ...m, streaming: false } : m))
+  }
+
+  async function toggleCall() {
+    if (callStatus !== 'idle') { stopCall(); return }
+
+    setCallStatus('connecting'); setCallError(null)
+    try {
+      const tokenRes = await fetch('/api/ai/call', { method: 'POST' })
+      if (!tokenRes.ok) throw new Error('Kon gesprek niet starten')
+
+      const { client_secret, orgContext, error } = await tokenRes.json() as {
+        client_secret?: { value: string }
+        orgContext?: { agentName?: string; voice?: string; orgNaam?: string }
+        error?: string
+      }
+      if (!client_secret?.value) throw new Error(error ?? 'No client secret')
+
+      const voiceOrgCtx: VoiceOrgContext = {
+        agentName: orgContext?.agentName,
+        orgNaam:   orgContext?.orgNaam,
       }
 
-      Object.keys(_collected).forEach(k => delete (_collected as Record<string, unknown>)[k])
-      setCallStatus('idle'); setAgentTalking(false); setUserTalking(false); setMuted(false)
-      setDemoStage('lookup'); setCompany(null); setMsgs([])
-      return
-    }
+      const collected: Collected = {}
 
-    setCallStatus('connecting')
-    try {
-      const tokenRes = await fetch('/api/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      const { client_secret, error } = await tokenRes.json() as { client_secret?: { value: string }; error?: string }
-      if (!client_secret?.value) throw new Error(error ?? 'No client secret')
+      const companyMsg = (info: CompanyInfo) =>
+        setMsgs(p => [...p, { role: 'ai', text: '', companyData: info, streaming: false }])
+
+      const cardMsg = (card: MiniCardData) =>
+        setMsgs(p => {
+          const last = p[p.length - 1]
+          if (last?.role === 'ai' && last.cards)
+            return [...p.slice(0, -1), { ...last, cards: [...last.cards, card] }]
+          return [...p, { role: 'ai', text: '', cards: [card], streaming: false }]
+        })
+
+      const setupAgent = createAgents(
+        voiceOrgCtx,
+        makeSetupTools(collected, companyMsg, setDemoStage),
+        makeActiesTools(collected, cardMsg),
+      )
 
       const session = new RealtimeSession(setupAgent, {
         model: 'gpt-4o-realtime-preview',
@@ -525,55 +562,61 @@ export default function SuusPage() {
           outputModalities: ['audio'],
           audio: {
             input: {
-              transcription: { model: 'gpt-4o-transcribe', language: 'nl' },
+              transcription:  { model: 'gpt-4o-transcribe', language: 'nl' },
               turnDetection: {
-                type: 'server_vad', threshold: 0.5,
-                prefixPaddingMs: 300, silenceDurationMs: 900,
+                type: 'server_vad', threshold: 0.7,
+                prefixPaddingMs: 300, silenceDurationMs: 1000,
               },
             },
-            output: { voice: 'shimmer' },
+            output: { voice: (orgContext?.voice ?? 'coral') as 'coral' },
           },
         },
       })
 
-      /* Agent handoff → update UI stage + trigger new agent to speak */
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      session.on('agent_handoff', (data: any) => {
-        try {
-          const history   = data?.context?.history ?? []
-          const lastMsg   = history[history.length - 1]
-          const agentName = (lastMsg?.name ?? '').replace(/^transfer_to_/, '')
-          if (agentName === 'acties') {
-            setDemoStage('acties')
-            _bridge.stage?.('acties')
-            // Trigger actiesAgent to speak — alleen als er geen response loopt
-            setTimeout(() => {
-              if (sessionRef.current && !agentRespondingRef.current) {
-                sessionRef.current.transport.sendEvent({ type: 'response.create' })
-              }
-            }, 400)
-          } else if (agentName === 'setup') {
-            // Nieuw contact — reset UI en _collected
-            Object.keys(_collected).forEach(k => delete (_collected as Record<string, unknown>)[k])
-            setDemoStage('lookup')
-            setCompany(null)
-            _bridge.stage?.('lookup')
-          }
-        } catch { /* ignore */ }
+      // Agent handoff
+      session.on('agent_handoff', (_ctx: unknown, _from: unknown, toAgent: { name?: string }) => {
+        const agentName = toAgent?.name ?? ''
+        if (agentName === 'acties') {
+          setDemoStage('acties')
+        } else if (agentName === 'setup') {
+          Object.keys(collected).forEach(k => delete (collected as Record<string, unknown>)[k])
+          setDemoStage('lookup'); setCompany(null)
+        }
       })
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       session.transport.on('*', (ev: any) => {
         switch (ev.type) {
+          case 'session.updated':
+            if (!greetingTriggeredRef.current) {
+              greetingTriggeredRef.current = true
+              session.transport.sendEvent({ type: 'response.create' })
+            }
+            break
 
-          /* ── VAD ── */
           case 'input_audio_buffer.speech_started': setUserTalking(true);  break
           case 'input_audio_buffer.speech_stopped': setUserTalking(false); break
-          case 'response.output_audio.delta':       setAgentTalking(true); agentRespondingRef.current = true; break
+          case 'response.output_audio.delta':       setAgentTalking(true); break
           case 'response.output_audio.done':        setAgentTalking(false); break
-          case 'response.done':                     setAgentTalking(false); agentRespondingRef.current = false; break
+          case 'response.done':
+            setAgentTalking(false)
+            if (!greetingDoneRef.current) {
+              greetingDoneRef.current = true
+              setGreetingDone(true)
+              session.transport.sendEvent({
+                type: 'session.update',
+                session: {
+                  turn_detection: {
+                    type: 'server_vad',
+                    threshold: 0.7,
+                    prefix_padding_ms: 300,
+                    silence_duration_ms: 1000,
+                  },
+                },
+              })
+            }
+            break
 
-          /* ── Agent streaming transcript ── */
           case 'response.output_audio_transcript.delta': {
             const delta: string = ev.delta ?? ''
             if (!streamingRef.current) {
@@ -583,19 +626,19 @@ export default function SuusPage() {
               streamingTextRef.current += delta
               const text = streamingTextRef.current
               setMsgs(p => {
-                const next = [...p]; const i = next.findLastIndex(m => m.role === 'ai')
+                const next = [...p]; const i = next.findLastIndex(m => m.role === 'ai' && m.streaming)
                 if (i >= 0) next[i] = { ...next[i], text }; return next
               })
             }
             bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
             break
           }
+
           case 'response.output_audio_transcript.done':
             streamingRef.current = false; streamingTextRef.current = ''
-            setMsgs(p => p.map((m, i) => i === p.length - 1 && m.role === 'ai' ? { ...m, streaming: false } : m))
+            setMsgs(p => p.map(m => m.role === 'ai' && m.streaming ? { ...m, streaming: false } : m))
             break
 
-          /* ── User streaming transcript ── */
           case 'conversation.item.input_audio_transcription.delta': {
             const delta: string = ev.delta ?? ''
             if (!userStreamRef.current) {
@@ -612,16 +655,17 @@ export default function SuusPage() {
             bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
             break
           }
+
           case 'conversation.item.input_audio_transcription.completed': {
             const t: string = ev.transcript?.trim() ?? ''
             userStreamRef.current = false; userStreamTextRef.current = ''
             if (t) {
               setMsgs(p => {
-                const next  = [...p]
-                const last  = next.findLastIndex(m => m.role === 'user')
+                const next = [...p]
+                const last = next.findLastIndex(m => m.role === 'user')
                 if (last >= 0 && next[last].streaming) {
                   next[last] = { role: 'user', text: t, streaming: false }
-                } else if (t) {
+                } else {
                   next.push({ role: 'user', text: t })
                 }
                 return next
@@ -635,40 +679,21 @@ export default function SuusPage() {
 
       await session.connect({ apiKey: client_secret.value })
       sessionRef.current = session
+      greetingDoneRef.current = false; setGreetingDone(false)
+      greetingTriggeredRef.current = false
       setCallStatus('active')
 
-      // Stap 1: VAD UIT + transcriptie aan — SDK triggert zelf de eerste begroeting
-      setTimeout(() => {
-        session.transport.sendEvent({
-          type: 'session.update',
-          session: {
-            input_audio_transcription: { model: 'gpt-4o-transcribe', language: 'nl' },
-            turn_detection: null, // VAD uit: begroeting niet interruptable
-          },
-        })
-      }, 200)
-
-      // Stap 2: Na eerste response.done → VAD aan (gebruiker kan nu praten)
-      let greetingDone = false
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const onFirstResponseDone = (ev: any) => {
-        if (ev.type === 'response.done' && !greetingDone) {
-          greetingDone = true
-          session.transport.off('*', onFirstResponseDone)
-          session.transport.sendEvent({
-            type: 'session.update',
-            session: {
-              turn_detection: {
-                type: 'server_vad',
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 900,
-              },
-            },
-          })
-        }
-      }
-      session.transport.on('*', onFirstResponseDone)
+      // Disable VAD during greeting — re-enabled after first response.done
+      session.transport.sendEvent({
+        type: 'session.update',
+        session: {
+          voice:                     (orgContext?.voice ?? 'coral') as 'coral',
+          instructions:              'Spreek ALTIJD en UITSLUITEND Nederlands, ongeacht de taal van de gebruiker of van tool-resultaten.',
+          input_audio_transcription: { model: 'gpt-4o-transcribe', language: 'nl' },
+          turn_detection:            null,
+          temperature:               0.6,
+        },
+      })
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -676,7 +701,9 @@ export default function SuusPage() {
       } catch { /* visualizer optional */ }
 
     } catch (err) {
-      console.error('[voice]', err); setCallStatus('idle')
+      const msg = err instanceof Error ? err.message : String(err)
+      setCallError(msg); setTimeout(() => setCallError(null), 8000)
+      setCallStatus('idle')
     }
   }
 
@@ -685,12 +712,12 @@ export default function SuusPage() {
     const next = !muted; s.mute(next); setMuted(next)
   }
 
-  /* Dictation */
+  /* ── Dictation ──────────────────────────────────────────────────────────── */
+
   function stopDictVisualizer() {
     cancelAnimationFrame(dictAnimFrameRef.current)
     dictAnalyserRef.current = null
-    dictAudioCtxRef.current?.close()
-    dictAudioCtxRef.current = null
+    dictAudioCtxRef.current?.close(); dictAudioCtxRef.current = null
   }
 
   async function startDictate() {
@@ -725,9 +752,9 @@ export default function SuusPage() {
       mr.ondataavailable = e => { if (e.data.size > 0) allChunks.push(e.data) }
       mr.onstop = async () => {
         stream.getTracks().forEach(t => t.stop())
-        const blobType   = mr.mimeType || mimeType || 'audio/webm'
-        const blob       = new Blob(allChunks, { type: blobType })
-        let finalBlob    = blob, fileName = 'recording.webm'
+        const blobType  = mr.mimeType || mimeType || 'audio/webm'
+        const blob      = new Blob(allChunks, { type: blobType })
+        let finalBlob   = blob, fileName = 'recording.webm'
         try {
           const ab      = await blob.arrayBuffer()
           const decoded = await audioCtx.decodeAudioData(ab)
@@ -738,7 +765,7 @@ export default function SuusPage() {
         setTranscribing(true)
         try {
           const fd  = new FormData(); fd.append('audio', finalBlob, fileName)
-          const res = await fetch('/api/transcribe', { method: 'POST', body: fd })
+          const res = await fetch('/api/ai/transcribe', { method: 'POST', body: fd })
           const data = await res.json() as { text?: string }
           if (data.text) {
             setInput(prev => prev ? `${prev} ${data.text}` : data.text!)
@@ -752,9 +779,7 @@ export default function SuusPage() {
   }
 
   function stopDictate() {
-    dictRecorderRef.current?.stop()
-    dictRecorderRef.current = null
-    setDictating(false)
+    dictRecorderRef.current?.stop(); dictRecorderRef.current = null; setDictating(false)
   }
 
   function cancelDictate() {
@@ -764,8 +789,7 @@ export default function SuusPage() {
       dictRecorderRef.current.stop()
       dictRecorderRef.current = null
     }
-    stopDictVisualizer()
-    setDictating(false); setTranscribing(false)
+    stopDictVisualizer(); setDictating(false); setTranscribing(false)
   }
 
   function onImageFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -776,52 +800,83 @@ export default function SuusPage() {
     e.target.value = ''; setAttachOpen(false)
   }
 
-  /* Text chat */
   function resizeTextarea() {
     const el = textareaRef.current; if (!el) return
-    el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px'
   }
+
+  /* ── Text chat ──────────────────────────────────────────────────────────── */
 
   const sendMessage = useCallback(async (text: string, imageUrl?: string) => {
     if (!text.trim() && !imageUrl) return
     setInput(''); setPendingImage(null); setTimeout(resizeTextarea, 0)
-    setMsgs(p => [...p, { role: 'user', text, image_url: imageUrl }, { role: 'ai', text: '', streaming: true }])
+
+    setMsgs(p => [...p,
+      { role: 'user', text, image_url: imageUrl },
+      { role: 'ai',   text: '', streaming: true },
+    ])
+
     try {
-      const res = await fetch('/api/suus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text || '(afbeelding)' }) })
-      if (!res.ok || !res.body) throw new Error()
-      const reader = res.body.getReader(); const dec = new TextDecoder(); let full = ''
+      const res = await fetch('/api/ai/chat', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          message:    text || '(afbeelding)',
+          session_id: sessionId,
+          images:     imageUrl ? [{ base64: imageUrl.split(',')[1], mimeType: 'image/jpeg' }] : undefined,
+        }),
+      })
+      if (!res.ok || !res.body) {
+        const errText = await res.text().catch(() => `HTTP ${res.status}`)
+        throw new Error(`${res.status}: ${errText}`)
+      }
+
+      const reader  = res.body.getReader()
+      const decoder = new TextDecoder()
+      let full = ''
       while (true) {
-        const { done, value } = await reader.read(); if (done) break
-        full += dec.decode(value, { stream: true })
+        const { done, value } = await reader.read()
+        if (done) break
+        full += decoder.decode(value, { stream: true })
 
         const briefingMatch = full.match(/\n__BRIEFING__:(.+)/)
         const contactsMatch = full.match(/\n__CONTACTS__:(.+)/)
-        const companyMatch  = full.match(/\n__COMPANY__:(.+)/)
+        const cardsMatch    = full.match(/\n__CARDS__:(.+)/)
 
-        // Strip all markers for display
-        const visText = full
-          .replace(/\n__BRIEFING__:.+/, '')
-          .replace(/\n__CONTACTS__:.+/, '')
-          .replace(/\n__COMPANY__:.+/, '')
-          .trim()
-
-        const extra: Partial<Msg> = {}
-        if (briefingMatch) { try { extra.briefingData  = JSON.parse(briefingMatch[1]) as BriefingData } catch { /* ignore */ } }
-        if (contactsMatch)  { try { extra.contactsData = (JSON.parse(contactsMatch[1]) as { contacts: ContactCardData[] }).contacts } catch { /* ignore */ } }
-        if (companyMatch)   { try { extra.companyData  = JSON.parse(companyMatch[1]) as CompanyInfo } catch { /* ignore */ } }
-
-        const hasMarker = briefingMatch || contactsMatch || companyMatch
-        setMsgs(p => p.map((m, i) => i === p.length - 1
-          ? { ...m, text: visText, ...extra, streaming: hasMarker ? false : m.streaming }
-          : m,
-        ))
+        if (cardsMatch) {
+          const vis = full.replace(/\n__CARDS__:.+/, '').trim()
+          try {
+            const parsed = JSON.parse(cardsMatch[1]) as MiniCardData[]
+            setMsgs(p => p.map((m, i) => i === p.length - 1
+              ? { ...m, text: vis, cards: parsed, streaming: false } : m))
+          } catch { setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m)) }
+        } else if (briefingMatch) {
+          const vis = full.replace(/\n__BRIEFING__:.+/, '').trim()
+          try {
+            const parsed = JSON.parse(briefingMatch[1]) as BriefingData
+            setMsgs(p => p.map((m, i) => i === p.length - 1
+              ? { ...m, text: vis, briefingData: parsed, streaming: false } : m))
+          } catch { setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: vis } : m)) }
+        } else if (contactsMatch) {
+          const vis = full.replace(/\n__CONTACTS__:.+/, '').trim()
+          try {
+            const parsed = JSON.parse(contactsMatch[1]) as { contacts: ContactCardData[] }
+            setMsgs(p => p.map((m, i) => i === p.length - 1
+              ? { ...m, text: vis, contactsData: parsed.contacts, streaming: false } : m))
+          } catch { setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m)) }
+        } else {
+          setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: full } : m))
+        }
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
       }
       setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, streaming: false } : m))
-    } catch {
-      setMsgs(p => p.map((m, i) => i === p.length - 1 ? { ...m, text: 'Er ging iets mis.', streaming: false } : m))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setMsgs(p => p.map((m, i) => i === p.length - 1
+        ? { ...m, text: `Er ging iets mis: ${msg}`, streaming: false } : m))
     }
-  }, [])
+  }, [sessionId])
 
   const hasContent   = !!(input.trim() || pendingImage)
   const callIsActive = callStatus !== 'idle'
@@ -833,54 +888,35 @@ export default function SuusPage() {
     return 'idle' as const
   }
 
-  /* Render */
+  /* ── Render ─────────────────────────────────────────────────────────────── */
   return (
-    <div className="flex flex-col bg-bg flex-1 overflow-hidden" style={{ height: 'calc(100svh - var(--nav-height, 0px))' }}>
+    <div className="flex flex-col bg-bg overflow-hidden" style={{ height: 'calc(100svh - var(--nav-height, 64px))' }}>
 
-      {/* ── Top pill button ── */}
-      <div className="flex-shrink-0 px-4 pt-3 pb-1">
-        <div className="max-w-[760px] mx-auto flex justify-end">
-          <button
-            onClick={toggleCall}
-            className={cn(
-              'inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[12px] font-medium rounded-full transition-all shadow-sm',
-              callIsActive
-                ? 'bg-red-600 text-white hover:bg-red-700'
-                : 'bg-primary text-white hover:opacity-85',
-            )}
-          >
-            <Phone size={13} strokeWidth={2} />
-            {callStatus === 'connecting' ? 'Verbinden…' : callIsActive ? `Ophangen ${timer}` : 'Bellen'}
-          </button>
-        </div>
-      </div>
-
-
-      {/* ── Message feed ── */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden [scrollbar-width:thin] [scrollbar-color:theme(colors.border)_transparent]">
-        <div className="max-w-[720px] mx-auto w-full px-4 sm:px-6 pt-8 pb-4 flex flex-col">
+      {/* Message feed */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden [scrollbar-width:thin] [scrollbar-color:theme(colors.border-app)_transparent]">
+        <div className="max-w-[720px] mx-auto w-full px-4 sm:px-6 pt-14 pb-4 flex flex-col">
 
           {/* Empty state */}
           {msgs.length === 0 && (
             <div className="flex flex-col items-center gap-5 pt-16 pb-8 animate-fade-up">
               <VoiceOrb state={callIsActive ? orbState() : 'idle'} size={100} imageSrc={agentPhoto} />
               <div className="text-center">
-                <h2 className="text-[22px] font-bold tracking-tight text-primary mb-1 max-sm:text-lg">
-                  Hoi! Ik ben Suus.
+                <h2 className="text-[22px] font-bold tracking-tight text-copy mb-1 max-sm:text-lg">
+                  Hoi! Ik ben SUUS.
                 </h2>
-                <p className="text-[13px] text-muted">
+                <p className="text-[13px] text-copy-muted">
                   {callIsActive
-                    ? (callStatus === 'connecting' ? 'Verbinden…' : agentTalking ? 'Suus spreekt…' : userTalking ? 'Luisteren…' : 'Zeg iets…')
-                    : 'Start een gesprek of typ een vraag'}
+                    ? (callStatus === 'connecting' ? 'Verbinden…' : agentTalking ? 'SUUS spreekt…' : !greetingDone ? 'SUUS spreekt…' : userTalking ? 'Luisteren…' : 'Zeg iets…')
+                    : 'Stel een vraag, stuur een foto of start een gesprek'}
                 </p>
               </div>
               {!callIsActive && (
                 <div className="grid grid-cols-2 gap-2 w-full max-w-[420px]">
-                  {SUGGESTIONS.map((s, i) => (
+                  {DEFAULT_SUGGESTIONS.map((s, i) => (
                     <button
                       key={i}
                       onClick={() => sendMessage(s)}
-                      className="px-3.5 py-2.5 rounded-[10px] border border-border bg-surface text-xs font-medium text-primary text-left leading-snug transition-colors hover:bg-active"
+                      className="px-3.5 py-2.5 rounded-[10px] border border-border-app bg-surface text-xs font-medium text-copy text-left leading-snug transition-colors hover:bg-active"
                     >
                       {s}
                     </button>
@@ -892,12 +928,12 @@ export default function SuusPage() {
 
           {/* Messages */}
           {msgs.map((m, i) => (
-            <div key={i} className="py-2 animate-msg-in">
+            <div key={i} className="py-2">
               {m.role === 'user' ? (
                 <div className="flex justify-end">
                   <div className="max-w-[75%] max-sm:max-w-[85%]">
-                    <p className="text-[11px] font-bold text-primary mb-1 text-right">Jij</p>
-                    <div className="text-[14.5px] leading-[1.6] text-muted whitespace-pre-wrap break-words bg-white px-5 py-3 rounded-[22px] shadow-card">
+                    <p className="text-[11px] font-bold text-copy mb-1 text-right">Jij</p>
+                    <div className="text-[14.5px] leading-[1.6] text-copy-muted whitespace-pre-wrap break-words bg-white px-5 py-3 rounded-[22px]">
                       {m.image_url && (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img src={m.image_url} alt="bijlage" className="max-w-[200px] max-h-[150px] rounded-lg object-cover block mb-1.5" />
@@ -912,63 +948,54 @@ export default function SuusPage() {
                     <VoiceOrb state={m.streaming ? orbState() : 'idle'} size={28} imageSrc={agentPhoto} />
                   </div>
                   <div className="min-w-0 max-w-[520px]">
-                    <p className="text-[11px] font-bold text-primary mb-1">Suus</p>
-                    {m.text && (
-                      <div className="text-[14.5px] leading-[1.6] text-[#1a1a1a]">
+                    <p className="text-[11px] font-bold text-copy mb-1">SUUS</p>
+
+                    {/* Company / contact card inline */}
+                    {m.companyData && !m.streaming && (
+                      <div className="mb-2">
+                        <MiniCardList cards={[{
+                          type:      m.companyData.found ? 'contact_found' : 'contact_created',
+                          id:        m.companyData.contactId ?? '',
+                          title:     m.companyData.name,
+                          subtitle:  m.companyData.contactNaam,
+                          meta:      [m.companyData.address, m.companyData.city].filter(Boolean).join(', ') || undefined,
+                          contactId: m.companyData.contactId,
+                        }]} />
+                      </div>
+                    )}
+
+                    {m.text ? (
+                      <div className="text-[14.5px] leading-[1.6] text-copy-muted">
                         {m.streaming ? (
-                          <span className="whitespace-pre-wrap break-words">{m.text}<TypingDots /></span>
+                          <p className="whitespace-pre-wrap break-words">{m.text}<TypingDots /></p>
                         ) : (
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
                             components={{
                               p:      ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
-                              strong: ({children}) => <strong className="font-semibold text-primary">{children}</strong>,
+                              strong: ({children}) => <strong className="font-semibold text-copy">{children}</strong>,
+                              em:     ({children}) => <em className="italic">{children}</em>,
                               ul:     ({children}) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
                               ol:     ({children}) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
                               li:     ({children}) => <li className="leading-[1.6]">{children}</li>,
+                              h1:     ({children}) => <h1 className="text-[15px] font-bold mb-1.5 mt-2 text-copy">{children}</h1>,
+                              h2:     ({children}) => <h2 className="text-[14.5px] font-semibold mb-1 mt-2 text-copy">{children}</h2>,
+                              h3:     ({children}) => <h3 className="text-[14px] font-semibold mb-1 mt-1.5 text-copy">{children}</h3>,
+                              code:   ({children}) => <code className="bg-black/6 rounded px-1 py-0.5 text-[13px] font-mono">{children}</code>,
+                              a:      ({href, children}) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline underline-offset-2">{children}</a>,
                             }}
-                          >{m.text}</ReactMarkdown>
+                          >
+                            {m.text}
+                          </ReactMarkdown>
                         )}
                       </div>
-                    )}
-                    {!m.text && m.streaming && <TypingDots />}
+                    ) : m.streaming ? (
+                      <TypingDots />
+                    ) : null}
 
-                    {/* Inline company card (text chat result) */}
-                    {m.companyData && !m.streaming && (
-                      <div className="mt-2.5 max-w-[420px]">
-                        <div className="flex items-start gap-3 px-4 py-3 bg-surface border border-border rounded-[14px] shadow-card">
-                          <div className="w-9 h-9 rounded-[10px] bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
-                            <Building2 size={17} className="text-primary" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-[14px] font-semibold text-primary">{m.companyData.name}</span>
-                              {m.companyData.found !== undefined && (
-                                <span className={cn(
-                                  'text-[10px] font-semibold px-2 py-0.5 rounded-full',
-                                  m.companyData.found ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-                                )}>
-                                  {m.companyData.found ? '✓ Gevonden in CRM' : '+ Aangemaakt in CRM'}
-                                </span>
-                              )}
-                            </div>
-                            {m.companyData.contactNaam && (
-                              <p className="text-[12px] text-secondary font-medium mt-0.5">{m.companyData.contactNaam}</p>
-                            )}
-                            {(m.companyData.address || m.companyData.city) && (
-                              <div className="flex items-center gap-1 mt-1">
-                                <MapPin size={11} className="text-muted flex-shrink-0" />
-                                <span className="text-[12px] text-muted">
-                                  {[m.companyData.address, m.companyData.city].filter(Boolean).join(', ')}
-                                </span>
-                              </div>
-                            )}
-                            {m.companyData.phone && (
-                              <p className="text-[11px] text-muted mt-0.5">{m.companyData.phone}</p>
-                            )}
-                          </div>
-                        </div>
-                      </div>
+                    {/* Action cards */}
+                    {m.cards && m.cards.length > 0 && !m.streaming && (
+                      <MiniCardList cards={m.cards} />
                     )}
 
                     {/* Briefing card */}
@@ -978,31 +1005,15 @@ export default function SuusPage() {
                       </div>
                     )}
 
-                    {/* Contact selector cards */}
+                    {/* Contact selector */}
                     {m.contactsData && m.contactsData.length > 0 && !m.streaming && (
-                      <div className="mt-2 flex flex-col gap-1.5 max-w-[420px]">
-                        {m.contactsData.map(c => {
-                          const name = c.companyName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Contact'
-                          const sub  = c.companyName ? [c.firstName, c.lastName].filter(Boolean).join(' ') : null
-                          return (
-                            <div key={c.contactId} className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border border-border bg-surface hover:bg-active transition-colors">
-                              <div className="flex-1 min-w-0">
-                                <div className="text-[13px] font-semibold text-primary truncate">{name}</div>
-                                {(sub || c.city) && (
-                                  <div className="text-[11px] text-muted truncate">{[sub, c.city].filter(Boolean).join(' · ')}</div>
-                                )}
-                              </div>
-                              <button
-                                onClick={() => sendMessage(`Briefing voor ${name} (contactId: ${c.contactId})`)}
-                                className="px-2.5 py-1 text-[11px] font-semibold bg-primary text-white rounded-lg border-none cursor-pointer hover:opacity-85 transition-opacity flex-shrink-0"
-                              >
-                                Briefing
-                              </button>
-                              <ExternalLink size={12} className="text-muted flex-shrink-0" />
-                            </div>
-                          )
-                        })}
-                      </div>
+                      <ContactSelectorCards
+                        contacts={m.contactsData}
+                        onSelect={c => {
+                          const name = c.companyName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'contact'
+                          sendMessage(`Gebruik contact ${name} (contactId: ${c.contactId})`)
+                        }}
+                      />
                     )}
                   </div>
                 </div>
@@ -1014,12 +1025,12 @@ export default function SuusPage() {
         </div>
       </div>
 
-      {/* ── Image preview ── */}
+      {/* Image preview */}
       {pendingImage && (
-        <div className="max-w-[760px] mx-auto px-4 pb-1.5 flex items-center gap-2">
+        <div className="max-w-[720px] mx-auto px-4 pb-1.5 flex items-center gap-2">
           <div className="relative inline-block">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={pendingImage.url} alt="preview" className="h-11 w-11 object-cover rounded-lg border border-border" />
+            <img src={pendingImage.url} alt="preview" className="h-11 w-11 object-cover rounded-lg border border-border-app" />
             <button
               onClick={() => setPendingImage(null)}
               className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white flex items-center justify-center border-none cursor-pointer"
@@ -1027,77 +1038,73 @@ export default function SuusPage() {
               <X size={9} />
             </button>
           </div>
-          <span className="text-[11px] text-muted">Afbeelding bijgevoegd</span>
+          <span className="text-[11px] text-copy-muted">Afbeelding bijgevoegd</span>
         </div>
       )}
 
-      {/* ── Input bar ── */}
-      <div className="px-4 pb-[max(16px,env(safe-area-inset-bottom))] pt-2 flex-shrink-0 border-t border-border">
+      {/* Input bar */}
+      <div className="px-4 pb-[max(16px,env(safe-area-inset-bottom))] pt-2 flex-shrink-0">
         <div className="max-w-[760px] mx-auto">
 
           {(dictating || transcribing) && !callIsActive ? (
-            /* Waveform bar during dictation */
-            <div className="flex items-center gap-3 px-4 py-4 border border-border rounded-[28px] bg-surface shadow-[0_2px_12px_rgba(0,0,0,.07)]">
-              <div className="flex-1 flex items-center justify-center gap-[2px] h-9 overflow-hidden">
-                {Array.from({ length: 72 }, (_, i) => (
+            <div className="flex items-center gap-3 px-4 py-4 border border-border-app rounded-[28px] bg-surface shadow-[0_2px_12px_rgba(0,0,0,.07),0_0_0_1px_rgba(0,0,0,.03)]">
+              <div className="flex-1 flex items-center justify-center gap-[3px] h-9 overflow-hidden">
+                {Array.from({ length: 48 }, (_, idx) => (
                   <div
-                    key={i}
-                    ref={el => { dictBarsRef.current[i] = el }}
+                    key={idx}
+                    ref={el => { dictBarsRef.current[idx] = el }}
                     className={cn('w-[3px] rounded-full origin-center transition-[height] duration-75',
-                      transcribing ? 'bg-muted/40' : 'bg-primary')}
+                      transcribing ? 'bg-copy-muted/40' : 'bg-copy')}
                     style={{ height: '3px' }}
                   />
                 ))}
               </div>
               <button onClick={cancelDictate} title="Annuleer"
-                className="w-9 h-9 rounded-full flex items-center justify-center text-muted hover:text-red-500 transition-colors flex-shrink-0 border-none bg-transparent cursor-pointer">
+                className="w-9 h-9 rounded-full flex items-center justify-center text-copy-muted hover:text-red-500 transition-colors border-none bg-transparent cursor-pointer">
                 <X size={18} strokeWidth={2} />
               </button>
               <button onClick={stopDictate} disabled={transcribing} title="Stop en transcribeer"
-                className="w-9 h-9 rounded-full bg-primary text-white flex items-center justify-center hover:opacity-85 transition-opacity disabled:opacity-40 flex-shrink-0 border-none cursor-pointer">
+                className="w-9 h-9 rounded-full bg-copy text-white flex items-center justify-center hover:opacity-85 transition-opacity disabled:opacity-40 flex-shrink-0 border-none cursor-pointer">
                 <Check size={16} strokeWidth={2.5} />
               </button>
             </div>
           ) : (
-            /* Normal input pill */
-            <div className="flex items-center gap-3 px-4 py-4 border border-border rounded-[28px] bg-surface shadow-[0_2px_12px_rgba(0,0,0,.07),0_0_0_1px_rgba(0,0,0,.03)] hover:shadow-[0_4px_18px_rgba(0,0,0,.1)] transition-shadow">
+            <div className="flex items-center gap-3 px-4 py-4 border border-border-app rounded-[28px] bg-surface shadow-[0_2px_12px_rgba(0,0,0,.07),0_0_0_1px_rgba(0,0,0,.03)] hover:shadow-[0_4px_18px_rgba(0,0,0,.1)] transition-shadow">
 
-              {/* Paperclip / attach */}
               <input ref={imageInputRef} type="file" accept="image/*" onChange={onImageFile} className="hidden" />
               <div className="relative flex-shrink-0" ref={attachRef}>
                 {attachOpen && (
-                  <div className="absolute bottom-[calc(100%+8px)] left-0 bg-surface border border-border rounded-[12px] shadow-[0_4px_20px_rgba(0,0,0,.12)] overflow-hidden min-w-[140px] z-50">
+                  <div className="absolute bottom-[calc(100%+8px)] left-0 bg-surface border border-border-app rounded-[12px] shadow-panel overflow-hidden min-w-[140px] z-50">
                     <button
-                      className="flex items-center gap-2 px-3.5 py-2.5 text-xs font-medium text-primary w-full hover:bg-active transition-colors border-none bg-transparent cursor-pointer"
+                      className="flex items-center gap-2 px-3.5 py-2.5 text-xs font-medium text-copy w-full hover:bg-active transition-colors border-none bg-transparent cursor-pointer"
                       onClick={() => imageInputRef.current?.click()}
                     >
-                      <ImageIcon size={13} className="text-muted" /> Afbeelding
+                      <ImageIcon size={13} className="text-copy-muted" /> Afbeelding
                     </button>
                   </div>
                 )}
                 <button
                   onClick={() => setAttachOpen(p => !p)}
                   title="Bijlage"
-                  className={cn('w-8 h-8 rounded-full flex items-center justify-center text-muted hover:text-primary transition-colors border-none bg-transparent cursor-pointer', pendingImage && 'text-primary')}
+                  className={cn('w-8 h-8 rounded-full flex items-center justify-center text-copy-muted hover:text-copy transition-colors border-none bg-transparent cursor-pointer', pendingImage && 'text-copy')}
                 >
                   <Plus size={22} strokeWidth={1.5} />
                 </button>
               </div>
 
-              {/* Textarea */}
               <textarea
                 ref={textareaRef}
                 value={input}
                 onChange={e => { setInput(e.target.value); resizeTextarea() }}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input, pendingImage?.base64) } }}
-                placeholder="Vraag Suus iets…"
+                placeholder="Vraag SUUS iets..."
                 rows={1}
                 autoComplete="off"
+                autoCorrect="on"
                 spellCheck={false}
-                className="flex-1 resize-none border-none bg-transparent text-[16px] text-primary outline-none leading-[1.55] max-h-40 overflow-y-auto p-0 font-[inherit] placeholder:text-muted"
+                className="flex-1 resize-none border-none bg-transparent text-[16px] text-copy outline-none leading-[1.55] max-h-40 overflow-y-auto p-0 font-[inherit] placeholder:text-copy-muted"
               />
 
-              {/* Right icons */}
               <div className="flex items-center gap-2 flex-shrink-0">
                 {callIsActive ? (
                   <div className="flex items-center gap-2 flex-shrink-0">
@@ -1105,14 +1112,14 @@ export default function SuusPage() {
                       onClick={toggleMute}
                       className={cn(
                         'w-8 h-8 rounded-full flex items-center justify-center transition-colors border-none bg-transparent cursor-pointer',
-                        muted ? 'bg-red-100 text-red-500' : 'text-muted hover:text-primary',
+                        muted ? 'bg-red-100 text-red-500' : 'text-copy-muted hover:text-copy',
                       )}
                     >
                       {muted ? <MicOff size={15} /> : <Mic size={15} />}
                     </button>
                     <VoiceOrb state={orbState()} size={28} imageSrc={agentPhoto} />
                     <button
-                      onClick={toggleCall}
+                      onClick={stopCall}
                       className="inline-flex items-center gap-2 pl-3 pr-4 h-9 bg-[#007AFF] text-white rounded-full hover:opacity-90 transition-opacity border-none cursor-pointer"
                     >
                       <div className="flex items-center gap-[2.5px]">
@@ -1132,17 +1139,14 @@ export default function SuusPage() {
                   </div>
                 ) : (
                   <>
-                    <button
-                      onClick={startDictate}
-                      title="Dicteer bericht"
-                      className="w-9 h-9 rounded-full flex items-center justify-center text-muted hover:text-primary transition-colors border-none bg-transparent cursor-pointer"
-                    >
+                    <button onClick={startDictate} title="Dicteer bericht"
+                      className="w-9 h-9 rounded-full flex items-center justify-center text-copy-muted hover:text-copy transition-colors border-none bg-transparent cursor-pointer">
                       <Mic size={20} strokeWidth={1.5} />
                     </button>
                     <button
                       onClick={() => { if (hasContent) sendMessage(input, pendingImage?.base64); else toggleCall() }}
                       title={hasContent ? 'Versturen (Enter)' : 'Gesprek starten'}
-                      className="w-9 h-9 rounded-full bg-primary text-white flex items-center justify-center hover:opacity-85 transition-opacity border-none cursor-pointer"
+                      className="w-9 h-9 rounded-full bg-copy text-white flex items-center justify-center hover:opacity-85 transition-opacity border-none cursor-pointer"
                     >
                       {hasContent ? <ArrowUp size={17} strokeWidth={2.5} /> : <AudioLines size={17} strokeWidth={2} />}
                     </button>
@@ -1152,9 +1156,22 @@ export default function SuusPage() {
             </div>
           )}
 
-          <p className="text-center text-[11px] text-muted mt-2 opacity-60 tracking-tight">
-            Suus kan fouten maken. Controleer altijd belangrijke informatie.
-          </p>
+          {callError && (
+            <div className="flex items-start gap-2 mx-1 mt-2 px-3 py-2 rounded-[10px] bg-red-50 border border-red-200 text-red-700 text-[12px] leading-snug">
+              <span className="mt-[1px] shrink-0">⚠️</span>
+              <span className="flex-1">
+                <span className="font-semibold">Fout — </span>
+                {callError.includes('getUserMedia') || callError.includes('NotAllowed')
+                  ? 'Microfoon toegang geweigerd. Geef toestemming in je browserinstellingen.'
+                  : 'Er ging iets mis. Probeer opnieuw of meld dit aan de beheerder.'}
+              </span>
+              <button onClick={() => setCallError(null)} className="shrink-0 text-red-400 hover:text-red-600 mt-[1px] bg-transparent border-none cursor-pointer">
+                <X size={13} strokeWidth={2.5} />
+              </button>
+            </div>
+          )}
+
+          <p className="text-center text-[11px] text-copy-muted/60 mt-2">SUUS kan fouten maken. Controleer altijd belangrijke informatie.</p>
         </div>
       </div>
     </div>
