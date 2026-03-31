@@ -535,7 +535,7 @@ export default function SuusPage() {
         },
       })
 
-      /* Agent handoff → update UI stage */
+      /* Agent handoff → update UI stage + trigger new agent to speak */
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       session.on('agent_handoff', (data: any) => {
         try {
@@ -545,6 +545,13 @@ export default function SuusPage() {
           if (agentName === 'acties') {
             setDemoStage('acties')
             _bridge.stage?.('acties')
+            // Give SDK 300ms to update session, then trigger actiesAgent greeting
+            // Only fire if no response is already running
+            setTimeout(() => {
+              if (sessionRef.current) {
+                sessionRef.current.transport.sendEvent({ type: 'response.create' })
+              }
+            }, 300)
           } else if (agentName === 'setup') {
             // Nieuw contact — reset UI en _collected
             Object.keys(_collected).forEach(k => delete (_collected as Record<string, unknown>)[k])
@@ -630,14 +637,41 @@ export default function SuusPage() {
       sessionRef.current = session
       setCallStatus('active')
 
-      // Stuur transcription config + trigger eerste begroeting
+      // 1. Zet VAD tijdelijk UIT zodat de begroeting niet onderbroken kan worden
+      // 2. Start transcriptie + eerste begroeting
+      // 3. Na response.done: zet VAD terug aan
       setTimeout(() => {
         session.transport.sendEvent({
           type: 'session.update',
-          session: { input_audio_transcription: { model: 'gpt-4o-transcribe', language: 'nl' } },
+          session: {
+            input_audio_transcription: { model: 'gpt-4o-transcribe', language: 'nl' },
+            turn_detection: null, // VAD uit tijdens begroeting
+          },
         })
-        setTimeout(() => session.transport.sendEvent({ type: 'response.create' }), 100)
+        setTimeout(() => {
+          session.transport.sendEvent({ type: 'response.create' })
+        }, 100)
       }, 300)
+
+      // Zodra de begroeting klaar is, zet VAD weer aan
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const enableVadAfterGreeting = (ev: any) => {
+        if (ev.type === 'response.done') {
+          session.transport.off('*', enableVadAfterGreeting)
+          session.transport.sendEvent({
+            type: 'session.update',
+            session: {
+              turn_detection: {
+                type: 'server_vad',
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 900,
+              },
+            },
+          })
+        }
+      }
+      session.transport.on('*', enableVadAfterGreeting)
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
