@@ -987,10 +987,16 @@ class SuusAgent(Agent):
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
 
 async def entrypoint(ctx: JobContext) -> None:
+    logger.info("=== ENTRYPOINT CALLED === room=%s", ctx.room.name)
+    logger.info("NEXT_API_URL=%s", os.environ.get("NEXT_API_URL", "NOT SET"))
+    logger.info("DEEPGRAM_API_KEY set=%s", bool(os.environ.get("DEEPGRAM_API_KEY")))
+    logger.info("ELEVENLABS_API_KEY set=%s", bool(os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY")))
+    logger.info("OPENAI_API_KEY set=%s", bool(os.environ.get("OPENAI_API_KEY")))
+
     await ctx.connect()
+    logger.info("Connected to room: %s", ctx.room.name)
 
     # Guard against duplicate dispatch: exit if another SUUS agent is already active.
-    # This can happen when LiveKit Cloud auto-dispatch fires alongside an explicit dispatch.
     existing_agents = [
         p for p in ctx.room.remote_participants.values()
         if getattr(p, "kind", None) == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
@@ -1089,4 +1095,4 @@ async def entrypoint(ctx: JobContext) -> None:
 # ─── Entry ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="suus"))
