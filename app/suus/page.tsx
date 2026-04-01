@@ -295,6 +295,10 @@ export default function SuusPage() {
         if (roomName) startCardPolling(roomName)
       })
 
+      room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+        if (!room.canPlaybackAudio) room.startAudio().catch(() => {/* ignore */})
+      })
+
       room.on(RoomEvent.Disconnected, () => stopCall())
 
       room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
@@ -333,6 +337,8 @@ export default function SuusPage() {
       })
 
       await room.connect(url ?? process.env.NEXT_PUBLIC_LIVEKIT_URL ?? '', token)
+      // Unlock browser audio after user-gesture so incoming TTS actually plays
+      await room.startAudio()
       await room.localParticipant.setMicrophoneEnabled(true)
 
     } catch (err) {

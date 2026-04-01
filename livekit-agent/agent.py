@@ -444,9 +444,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(room=ctx.room, agent=router)
 
-    # AEC warmup runs for ~3s after the first participant audio arrives and
-    # suppresses TTS playback during that window. Wait it out before greeting.
-    await asyncio.sleep(3.5)
+    # Small delay for audio pipeline to stabilize before greeting
+    await asyncio.sleep(1.0)
     logger.info("Sending opening greeting")
     await session.say(
         "Hoi! Ik ben SUUS. "
