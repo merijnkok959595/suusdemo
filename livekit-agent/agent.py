@@ -8,14 +8,16 @@ Three focused agents:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Annotated
 
 import aiohttp
 from dotenv import load_dotenv
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -41,6 +43,7 @@ DEMO_ORG_ID  = os.environ.get("DEMO_ORG_ID", "")
 class CallState:
     org_id: str
     room_name: str
+    room: rtc.Room | None = field(default=None, repr=False)
     intent: str = ""
     contact_id: str = ""
     contact_name: str = ""
@@ -61,7 +64,22 @@ async def call_crm_tool(tool_name: str, args: dict, state: CallState) -> str:
         async with aiohttp.ClientSession(timeout=timeout) as http:
             async with http.post(f"{NEXT_API_URL}/api/voice/tool", json=payload) as resp:
                 data = await resp.json()
-                return str(data.get("result", ""))
+                result = str(data.get("result", ""))
+
+                # Push mini-card directly to browser via LiveKit data channel
+                card = data.get("card")
+                if card and state.room:
+                    try:
+                        packet = json.dumps({"type": "mini_card", "card": card}).encode()
+                        await state.room.local_participant.publish_data(
+                            packet,
+                            reliable=True,
+                        )
+                        logger.debug("Pushed card via data channel: %s", card.get("type"))
+                    except Exception as push_exc:  # noqa: BLE001
+                        logger.warning("Data channel push failed: %s", push_exc)
+
+                return result
     except Exception as exc:  # noqa: BLE001
         logger.error("call_crm_tool %s failed: %s", tool_name, exc)
         return f'{{"error": "{exc}"}}'
@@ -413,7 +431,7 @@ async def entrypoint(ctx: JobContext) -> None:
     room_name = ctx.room.name
     logger.info("SUUS agent started  room=%s  org=%s", room_name, org_id)
 
-    state  = CallState(org_id=org_id, room_name=room_name)
+    state  = CallState(org_id=org_id, room_name=room_name, room=ctx.room)
     router = SuusRouter(state=state)
 
     session = AgentSession(

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Room, RoomEvent, type TranscriptionSegment, type Participant } from 'livekit-client'
+import { Room, RoomEvent, type TranscriptionSegment, type Participant, type RemoteParticipant } from 'livekit-client'
 import { ArrowUp, Mic, MicOff, AudioLines, X, Plus, ImageIcon, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -267,7 +267,10 @@ export default function SuusPage() {
     setCallStatus('connecting'); setCallError(null)
     try {
       const res = await fetch('/api/livekit/token', { method: 'POST' })
-      if (!res.ok) throw new Error('Kon gesprek niet starten')
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({})) as { error?: string }
+        throw new Error(errData.error ?? `HTTP ${res.status}`)
+      }
 
       const { token, roomName, url, error } = await res.json() as {
         token?:    string
@@ -310,6 +313,23 @@ export default function SuusPage() {
         participant: Participant | undefined,
       ) => {
         handleTranscription(segments, participant)
+      })
+
+      room.on(RoomEvent.DataReceived, (
+        data: Uint8Array,
+        _participant: RemoteParticipant | undefined,
+      ) => {
+        try {
+          const payload = JSON.parse(new TextDecoder().decode(data)) as { type?: string; card?: MiniCardData }
+          if (payload.type === 'mini_card' && payload.card) {
+            setMsgs(p => {
+              const last = p[p.length - 1]
+              if (last?.role === 'ai' && last.cards && !last.streaming)
+                return [...p.slice(0, -1), { ...last, cards: [...last.cards, payload.card!] }]
+              return [...p, { role: 'ai', text: '', cards: [payload.card!], streaming: false }]
+            })
+          }
+        } catch { /* ignore malformed packets */ }
       })
 
       await room.connect(url ?? process.env.NEXT_PUBLIC_LIVEKIT_URL ?? '', token)
@@ -767,7 +787,7 @@ export default function SuusPage() {
                 <span className="font-semibold">Fout — </span>
                 {callError.includes('getUserMedia') || callError.includes('NotAllowed')
                   ? 'Microfoon toegang geweigerd. Geef toestemming in je browserinstellingen.'
-                  : 'Er ging iets mis. Probeer opnieuw of meld dit aan de beheerder.'}
+                  : callError}
               </span>
               <button onClick={() => setCallError(null)} className="shrink-0 text-red-400 hover:text-red-600 mt-[1px] bg-transparent border-none cursor-pointer">
                 <X size={13} strokeWidth={2.5} />

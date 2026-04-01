@@ -57,14 +57,12 @@ export async function POST(req: Request) {
       ? await handleLogBezoek(args, ctx)
       : await executeTool(toolName, args, ctx)
 
-    // Push mini card for frontend polling
-    const key = roomName || orgId
-    if (key) {
-      const card = buildCard(toolName, args, result)
-      if (card) addCard(key, card)
-    }
+    // Build card — returned to agent for data-channel push AND kept in poll store as fallback
+    const card = buildCard(toolName, args, result)
+    const key  = roomName || orgId
+    if (card && key) addCard(key, card)
 
-    return NextResponse.json({ result })
+    return NextResponse.json({ result, card: card ?? null })
   } catch (err) {
     console.error('[/api/voice/tool]', err)
     return NextResponse.json({ result: `Fout: ${String(err)}` }, { status: 500 })
