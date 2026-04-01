@@ -297,25 +297,31 @@ def make_tools(org_id: str, room_name: str) -> list:  # noqa: C901
 
 # ─── Agent class ──────────────────────────────────────────────────────────────
 
+def build_instructions() -> str:
+    """Inject today/tomorrow dates into system prompt at session start."""
+    from datetime import datetime, timedelta
+    tz   = "Europe/Amsterdam"
+    now  = datetime.now()
+    today    = now.strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M")
+    return (
+        SYSTEM_PROMPT
+        + f"\n\n## Huidige datum/tijd\n"
+        + f"vandaag={today} | morgen={tomorrow} | tijd={time_str} | surface=voice"
+    )
+
+
 class SuusAgent(Agent):
     def __init__(self, tools: list) -> None:
         super().__init__(
-            instructions=SYSTEM_PROMPT,
+            instructions=build_instructions(),
             tools=tools,
         )
 
     async def on_enter(self) -> None:
-        from datetime import datetime, timezone
-        tz_offset = "+02:00"
-        today     = datetime.now().strftime("%Y-%m-%d")
-        tomorrow  = (datetime.now().replace(hour=0, minute=0, second=0) 
-                     .__class__.fromtimestamp(
-                         datetime.now().timestamp() + 86400
-                     )).strftime("%Y-%m-%d")
-        ctx_header = f"[ctx:vandaag={today}|morgen={tomorrow}|surface=voice]"
-
         await self.session.say(
-            f"{ctx_header} Hoi! Ik ben SUUS. "
+            "Hoi! Ik ben SUUS. "
             "Noem de bedrijf- en plaatsnaam, dan zoek ik het contact voor je op."
         )
 
