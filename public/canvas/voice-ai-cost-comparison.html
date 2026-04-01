@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice AI Cost Comparison</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --accent: #00ff88;
+    --accent2: #ff6b35;
+    --accent3: #7c3aed;
+    --text: #e0e0f0;
+    --muted: #6b6b8a;
+    --openai: #10a37f;
+    --deepgram: #ff6b35;
+    --elevenlabs: #7c3aed;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    padding: 32px;
+  }
+  h1 {
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    margin-bottom: 4px;
+    background: linear-gradient(135deg, var(--accent), #00ccff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle { color: var(--muted); font-family: 'Space Mono', monospace; font-size: 0.75rem; margin-bottom: 32px; }
+
+  .slider-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 28px;
+  }
+  .slider-label { font-size: 0.85rem; color: var(--muted); font-family: 'Space Mono', monospace; margin-bottom: 8px; }
+  .slider-row { display: flex; align-items: center; gap: 16px; }
+  input[type=range] {
+    flex: 1;
+    -webkit-appearance: none;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 0 8px var(--accent);
+  }
+  .slider-val {
+    font-family: 'Space Mono', monospace;
+    font-size: 1rem;
+    color: var(--accent);
+    min-width: 80px;
+    text-align: right;
+  }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 28px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s;
+  }
+  .card:hover { transform: translateY(-2px); }
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+  }
+  .card.openai::before { background: var(--openai); }
+  .card.deepgram::before { background: var(--deepgram); }
+  .card.elevenlabs::before { background: var(--elevenlabs); }
+
+  .card-badge {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+  }
+  .card.openai .card-badge { background: rgba(16,163,127,0.15); color: var(--openai); }
+  .card.deepgram .card-badge { background: rgba(255,107,53,0.15); color: var(--deepgram); }
+  .card.elevenlabs .card-badge { background: rgba(124,58,237,0.15); color: var(--elevenlabs); }
+
+  .card-name { font-size: 1.1rem; font-weight: 800; margin-bottom: 4px; }
+  .card-mode { font-family: 'Space Mono', monospace; font-size: 0.7rem; color: var(--muted); margin-bottom: 16px; line-height: 1.5; }
+  .cost-big {
+    font-family: 'Space Mono', monospace;
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 2px;
+  }
+  .cost-label { font-size: 0.72rem; color: var(--muted); margin-bottom: 16px; }
+  .breakdown { border-top: 1px solid var(--border); padding-top: 12px; }
+  .breakdown-row {
+    display: flex; justify-content: space-between;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--muted);
+    margin-bottom: 5px;
+    align-items: center;
+  }
+  .breakdown-row .val { color: var(--text); }
+  .badge-best {
+    display: inline-block;
+    background: rgba(0,255,136,0.15);
+    color: var(--accent);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    padding: 2px 7px;
+    border-radius: 20px;
+    border: 1px solid rgba(0,255,136,0.3);
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+
+  .chart-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 28px;
+  }
+  .chart-title { font-size: 0.8rem; font-family: 'Space Mono', monospace; color: var(--muted); margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.1em; }
+  .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .bar-label { font-family: 'Space Mono', monospace; font-size: 0.7rem; color: var(--text); width: 230px; flex-shrink: 0; }
+  .bar-track { flex: 1; height: 28px; background: var(--border); border-radius: 4px; overflow: hidden; position: relative; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; display: flex; align-items: center; padding-left: 8px; min-width: 70px; }
+  .bar-fill span { font-family: 'Space Mono', monospace; font-size: 0.68rem; font-weight: 700; color: #000; white-space: nowrap; }
+  .bar-openai { background: var(--openai); }
+  .bar-openai-full { background: #0d7a60; }
+  .bar-deepgram { background: var(--deepgram); }
+  .bar-deepgram-diy { background: #cc5528; }
+  .bar-elevenlabs { background: var(--elevenlabs); }
+
+  .pros-cons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 28px; }
+  .pc-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .pc-name { font-weight: 700; font-size: 0.95rem; margin-bottom: 14px; }
+  .pc-section-title { font-family: 'Space Mono', monospace; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+  .pc-pros .pc-section-title { color: var(--accent); }
+  .pc-cons .pc-section-title { color: var(--accent2); }
+  ul { list-style: none; margin-bottom: 12px; }
+  li { font-size: 0.78rem; color: var(--muted); padding: 3px 0; padding-left: 14px; position: relative; line-height: 1.5; }
+  li::before { content: '–'; position: absolute; left: 0; }
+  .pc-pros li::before { color: var(--accent); }
+  .pc-cons li::before { color: var(--accent2); }
+
+  .verdict {
+    background: linear-gradient(135deg, rgba(0,255,136,0.05), rgba(0,204,255,0.05));
+    border: 1px solid rgba(0,255,136,0.2);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .verdict-title { font-size: 0.75rem; font-family: 'Space Mono', monospace; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 16px; }
+  .verdict-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .verdict-item h4 { font-size: 0.9rem; font-weight: 700; margin-bottom: 6px; }
+  .verdict-item p { font-size: 0.78rem; color: var(--muted); line-height: 1.6; }
+
+  .note {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--muted);
+    margin-top: 20px;
+    line-height: 1.6;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Voice AI Cost Comparison</h1>
+<p class="subtitle">// OpenAI Realtime API vs ElevenLabs vs Deepgram — Apr 2026</p>
+
+<div class="slider-section">
+  <div class="slider-label">MONTHLY USAGE — HOURS OF VOICE CONVERSATION</div>
+  <div class="slider-row">
+    <input type="range" id="hoursSlider" min="1" max="500" value="50">
+    <div class="slider-val" id="hoursVal">50 hrs/mo</div>
+  </div>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="chart-section">
+  <div class="chart-title">Cost per hour — all options ranked cheapest → most expensive</div>
+  <div id="barChart"></div>
+</div>
+
+<div class="pros-cons">
+  <div class="pc-card">
+    <div class="pc-name" style="color:var(--openai)">OpenAI Realtime API</div>
+    <div class="pc-pros">
+      <div class="pc-section-title">Pros</div>
+      <ul>
+        <li>All-in-one: STT + LLM + TTS bundled</li>
+        <li>Mini model is the cheapest overall option</li>
+        <li>Single API, no service stitching</li>
+        <li>GPT-4o LLM quality baked in</li>
+        <li>Very low latency (single round-trip)</li>
+      </ul>
+    </div>
+    <div class="pc-cons">
+      <div class="pc-section-title">Cons</div>
+      <ul>
+        <li>Fully locked into OpenAI</li>
+        <li>Full model (gpt-4o) is expensive</li>
+        <li>Limited voice/persona choices</li>
+        <li>Cannot swap to a cheaper LLM</li>
+      </ul>
+    </div>
+  </div>
+  <div class="pc-card">
+    <div class="pc-name" style="color:var(--deepgram)">Deepgram</div>
+    <div class="pc-pros">
+      <div class="pc-section-title">Pros</div>
+      <ul>
+        <li>Industry-leading STT accuracy</li>
+        <li>Cheapest STT at $0.0077/min</li>
+        <li>Bring your own LLM (any model)</li>
+        <li>$200 free credits, no expiry</li>
+        <li>Voice Agent API = simple setup</li>
+      </ul>
+    </div>
+    <div class="pc-cons">
+      <div class="pc-section-title">Cons</div>
+      <ul>
+        <li>Voice Agent is $4.50/hr (priciest option)</li>
+        <li>Aura TTS quality is average</li>
+        <li>DIY pipeline needs more plumbing</li>
+        <li>Growth plan requires $4K+/yr commitment</li>
+      </ul>
+    </div>
+  </div>
+  <div class="pc-card">
+    <div class="pc-name" style="color:var(--elevenlabs)">ElevenLabs</div>
+    <div class="pc-pros">
+      <div class="pc-section-title">Pros</div>
+      <ul>
+        <li>Best-in-class TTS voice naturalness</li>
+        <li>Ultra-low TTS latency (~75ms Flash)</li>
+        <li>Voice cloning & custom personas</li>
+        <li>90+ languages, STT + TTS together</li>
+        <li>Great for premium branded UX</li>
+      </ul>
+    </div>
+    <div class="pc-cons">
+      <div class="pc-section-title">Cons</div>
+      <ul>
+        <li>TTS character costs add up fast</li>
+        <li>Need separate LLM (more complexity)</li>
+        <li>Most expensive for full pipeline</li>
+        <li>Not built for real-time voice primarily</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="verdict">
+  <div class="verdict-title">// Bottom line recommendations</div>
+  <div class="verdict-grid">
+    <div class="verdict-item">
+      <h4>Keep OpenAI Realtime if...</h4>
+      <p>You want the simplest stack at the lowest cost. The mini model at ~$1.08/hr is hard to beat. You're already integrated — don't over-engineer it.</p>
+    </div>
+    <div class="verdict-item">
+      <h4>Switch to Deepgram DIY if...</h4>
+      <p>You want to swap your LLM (e.g., Claude, Llama) or need the most accurate transcription. Build: Deepgram STT + any LLM + Aura-2 TTS ≈ $2.30/hr.</p>
+    </div>
+    <div class="verdict-item">
+      <h4>Add ElevenLabs TTS if...</h4>
+      <p>Voice quality is a product differentiator for you. Use ElevenLabs Flash for TTS only, keep Deepgram for STT, and pick your LLM. ~$3.18/hr but premium feel.</p>
+    </div>
+  </div>
+</div>
+
+<div class="note">
+  * Assumptions: 750 chars/min speech output, 600 audio tokens/min input+output, GPT-4o-mini LLM negligible at ~$0.001/min.<br>
+  * OpenAI Realtime full (gpt-4o) ≈ $3.46/hr · Deepgram Voice Agent API ≈ $4.50/hr flat.<br>
+  * Prices as of April 2026. Always verify at platform.openai.com, deepgram.com/pricing, elevenlabs.io/pricing/api.
+</div>
+
+<script>
+  const OPTIONS = [
+    {
+      id: 'openai',
+      name: 'OpenAI Realtime mini',
+      mode: 'gpt-4o-realtime-mini\nAll-in-one: STT + LLM + TTS',
+      cls: 'openai',
+      badge: 'Your current setup',
+      costPerHour: 1.08,
+      breakdown: [
+        { label: 'STT', val: 'included' },
+        { label: 'LLM', val: 'included' },
+        { label: 'TTS', val: 'included' },
+        { label: 'Audio in ~$0.006/min', val: '↑' },
+        { label: 'Audio out ~$0.012/min', val: '↑' },
+      ],
+      best: true
+    },
+    {
+      id: 'deepgram',
+      name: 'Deepgram DIY',
+      mode: 'Nova-3 STT + GPT-4o-mini\n+ Aura-2 TTS',
+      cls: 'deepgram',
+      badge: 'Alternative',
+      costPerHour: 2.30,
+      breakdown: [
+        { label: 'STT Nova-3', val: '$0.46/hr' },
+        { label: 'LLM (GPT-4o-mini)', val: '~$0.06/hr' },
+        { label: 'TTS Aura-2', val: '$1.80/hr' },
+        { label: 'Swap LLM freely?', val: 'Yes ✓' },
+      ],
+      best: false
+    },
+    {
+      id: 'elevenlabs',
+      name: 'ElevenLabs Stack',
+      mode: 'Deepgram STT + GPT-4o-mini\n+ ElevenLabs Flash TTS',
+      cls: 'elevenlabs',
+      badge: 'Premium voice',
+      costPerHour: 3.18,
+      breakdown: [
+        { label: 'STT Scribe v2 RT', val: '$0.39/hr' },
+        { label: 'LLM (GPT-4o-mini)', val: '~$0.06/hr' },
+        { label: 'TTS Flash', val: '$2.70/hr' },
+        { label: 'Voice quality', val: '★★★★★' },
+      ],
+      best: false
+    }
+  ];
+
+  const ALL_BARS = [
+    { label: 'OpenAI Realtime mini ← CHEAPEST', cost: 1.08, cls: 'bar-openai' },
+    { label: 'Deepgram DIY (STT + LLM + TTS)', cost: 2.30, cls: 'bar-deepgram-diy' },
+    { label: 'ElevenLabs Stack (premium TTS)', cost: 3.18, cls: 'bar-elevenlabs' },
+    { label: 'OpenAI Realtime (gpt-4o full)', cost: 3.46, cls: 'bar-openai-full' },
+    { label: 'Deepgram Voice Agent (all-in-one)', cost: 4.50, cls: 'bar-deepgram' },
+  ];
+
+  function render(hours) {
+    const cards = document.getElementById('cards');
+    cards.innerHTML = OPTIONS.map(o => {
+      const monthly = (o.costPerHour * hours).toFixed(0);
+      return `
+        <div class="card ${o.cls}">
+          <span class="card-badge">${o.badge}</span>
+          <div class="card-name">${o.name}${o.best ? '<span class="badge-best">cheapest</span>' : ''}</div>
+          <div class="card-mode">${o.mode.replace('\n', '<br>')}</div>
+          <div class="cost-big">$${monthly}</div>
+          <div class="cost-label">/month @ ${hours} hrs &nbsp;·&nbsp; $${o.costPerHour.toFixed(2)}/hr</div>
+          <div class="breakdown">
+            ${o.breakdown.map(b => `
+              <div class="breakdown-row">
+                <span>${b.label}</span>
+                <span class="val">${b.val}</span>
+              </div>`).join('')}
+          </div>
+        </div>`;
+    }).join('');
+
+    const maxCost = 5.0;
+    const chart = document.getElementById('barChart');
+    chart.innerHTML = ALL_BARS.map(b => {
+      const pct = (b.cost / maxCost * 100).toFixed(1);
+      return `
+        <div class="bar-row">
+          <div class="bar-label">${b.label}</div>
+          <div class="bar-track">
+            <div class="bar-fill ${b.cls}" style="width:${pct}%">
+              <span>$${b.cost.toFixed(2)}/hr</span>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  const slider = document.getElementById('hoursSlider');
+  const val = document.getElementById('hoursVal');
+  slider.addEventListener('input', () => {
+    val.textContent = slider.value + ' hrs/mo';
+    render(parseInt(slider.value));
+  });
+  render(50);
+</script>
+</body>
+</html>

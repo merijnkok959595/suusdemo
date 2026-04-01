@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Room, RoomEvent, type TranscriptionSegment, type Participant, type RemoteParticipant } from 'livekit-client'
+import { LiveKitRoom, useRoomContext } from '@livekit/components-react'
+import { RoomEvent, type TranscriptionSegment, type Participant } from 'livekit-client'
 import { ArrowUp, Mic, MicOff, AudioLines, X, Plus, ImageIcon, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -130,7 +131,9 @@ export default function SuusPage() {
   const [callError,    setCallError]    = useState<string | null>(null)
   const agentPhoto = '/suus.jpg'
 
-  const livekitRoomRef     = useRef<Room | null>(null)
+  const [lkToken,   setLkToken]   = useState<string | null>(null)
+  const [lkUrl,     setLkUrl]     = useState<string>('')
+  const [lkRoom,    setLkRoom]    = useState<string>('')
   const segmentStateRef    = useRef<Map<string, TranscriptSegmentState>>(new Map())
   const agentTalkingRef    = useRef(false)
   const greetingDoneRef    = useRef(false)
@@ -250,12 +253,11 @@ export default function SuusPage() {
 
   function stopCall() {
     stopCardPolling()
-    try { livekitRoomRef.current?.disconnect() } catch { /* ignore */ }
-    livekitRoomRef.current = null
     segmentStateRef.current.clear()
     agentTalkingRef.current = false
     greetingDoneRef.current = false
     setGreetingDone(false)
+    setLkToken(null); setLkUrl(''); setLkRoom('')
     setCallStatus('idle'); setAgentTalking(false); setUserTalking(false); setMuted(false)
     setCallId(null)
     setMsgs(p => p.map(m => m.streaming ? { ...m, streaming: false } : m))
@@ -271,76 +273,19 @@ export default function SuusPage() {
         const errData = await res.json().catch(() => ({})) as { error?: string }
         throw new Error(errData.error ?? `HTTP ${res.status}`)
       }
-
-      const { token, roomName, url, error } = await res.json() as {
-        token?:    string
-        roomName?: string
-        url?:      string
-        error?:    string
+      const data = await res.json() as {
+        participant_token?: string; token?: string
+        server_url?: string; url?: string
+        roomName?: string; error?: string
       }
-      if (!token) throw new Error(error ?? 'No token')
+      const tok  = data.participant_token ?? data.token
+      const url  = data.server_url ?? data.url ?? process.env.NEXT_PUBLIC_LIVEKIT_URL ?? ''
+      const room = data.roomName ?? ''
+      if (!tok) throw new Error(data.error ?? 'No token')
 
-      setCallId(roomName ?? null)
-
-      const room = new Room({
-        adaptiveStream:   true,
-        dynacast:         true,
-      })
-      livekitRoomRef.current = room
-
-      room.on(RoomEvent.Connected, () => {
-        setCallStatus('active')
-        greetingDoneRef.current = false
-        setGreetingDone(false)
-        if (roomName) startCardPolling(roomName)
-      })
-
-      room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
-        if (!room.canPlaybackAudio) room.startAudio().catch(() => {/* ignore */})
-      })
-
-      room.on(RoomEvent.Disconnected, () => stopCall())
-
-      room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
-        const agentSpeaking = speakers.some(s => !s.isLocal)
-        const userSpeaking  = speakers.some(s => s.isLocal)
-        agentTalkingRef.current = agentSpeaking
-        setAgentTalking(agentSpeaking)
-        setUserTalking(userSpeaking)
-        if (!agentSpeaking) {
-          setMsgs(p => p.map(m => m.streaming && m.role === 'ai' ? { ...m, streaming: false } : m))
-        }
-      })
-
-      room.on(RoomEvent.TranscriptionReceived, (
-        segments: TranscriptionSegment[],
-        participant: Participant | undefined,
-      ) => {
-        handleTranscription(segments, participant)
-      })
-
-      room.on(RoomEvent.DataReceived, (
-        data: Uint8Array,
-        _participant: RemoteParticipant | undefined,
-      ) => {
-        try {
-          const payload = JSON.parse(new TextDecoder().decode(data)) as { type?: string; card?: MiniCardData }
-          if (payload.type === 'mini_card' && payload.card) {
-            setMsgs(p => {
-              const last = p[p.length - 1]
-              if (last?.role === 'ai' && last.cards && !last.streaming)
-                return [...p.slice(0, -1), { ...last, cards: [...last.cards, payload.card!] }]
-              return [...p, { role: 'ai', text: '', cards: [payload.card!], streaming: false }]
-            })
-          }
-        } catch { /* ignore malformed packets */ }
-      })
-
-      await room.connect(url ?? process.env.NEXT_PUBLIC_LIVEKIT_URL ?? '', token)
-      // Unlock browser audio after user-gesture so incoming TTS actually plays
-      await room.startAudio()
-      await room.localParticipant.setMicrophoneEnabled(true)
-
+      setLkToken(tok); setLkUrl(url); setLkRoom(room)
+      setCallId(room)
+      // LiveKitRoom component takes over — see JSX below
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setCallError(msg); setTimeout(() => setCallError(null), 8000)
@@ -349,10 +294,7 @@ export default function SuusPage() {
   }
 
   function toggleMute() {
-    const room = livekitRoomRef.current; if (!room) return
-    const next = !muted
-    room.localParticipant.setMicrophoneEnabled(next)
-    setMuted(!next)
+    setMuted(m => !m)
   }
 
   /* ── Dictation ──────────────────────────────────────────────────────────── */
@@ -533,6 +475,35 @@ export default function SuusPage() {
 
   /* ── Render ─────────────────────────────────────────────────────────────── */
   return (
+    <>
+    {/* LiveKitRoom: handles WebRTC, audio playback unlocking, and mic */}
+    {lkToken && lkUrl && (
+      <LiveKitRoom
+        serverUrl={lkUrl}
+        token={lkToken}
+        audio={!muted}
+        video={false}
+        onConnected={() => {
+          setCallStatus('active')
+          greetingDoneRef.current = false
+          setGreetingDone(false)
+          if (lkRoom) startCardPolling(lkRoom)
+        }}
+        onDisconnected={() => stopCall()}
+      >
+        <LiveKitEvents
+          onTranscription={handleTranscription}
+          onAgentSpeaking={(v) => { agentTalkingRef.current = v; setAgentTalking(v) }}
+          onUserSpeaking={setUserTalking}
+          onCard={(card) => setMsgs(p => {
+            const last = p[p.length - 1]
+            if (last?.role === 'ai' && last.cards && !last.streaming)
+              return [...p.slice(0, -1), { ...last, cards: [...last.cards, card] }]
+            return [...p, { role: 'ai', text: '', cards: [card], streaming: false }]
+          })}
+        />
+      </LiveKitRoom>
+    )}
     <div className="flex flex-col bg-bg overflow-hidden" style={{ height: 'calc(100svh - var(--nav-height, 64px))' }}>
 
       {/* Message feed */}
@@ -805,5 +776,50 @@ export default function SuusPage() {
         </div>
       </div>
     </div>
+    </>
   )
+}
+
+/* ── LiveKitEvents: runs inside LiveKitRoom context ─────────────────────────── */
+
+function LiveKitEvents({
+  onTranscription,
+  onAgentSpeaking,
+  onUserSpeaking,
+  onCard,
+}: {
+  onTranscription: (segs: TranscriptionSegment[], p: Participant | undefined) => void
+  onAgentSpeaking: (v: boolean) => void
+  onUserSpeaking:  (v: boolean) => void
+  onCard:          (card: MiniCardData) => void
+}) {
+  const room = useRoomContext()
+
+  useEffect(() => {
+    const onTranscript = (segs: TranscriptionSegment[], p: Participant | undefined) =>
+      onTranscription(segs, p)
+
+    const onSpeakers = (speakers: Participant[]) => {
+      onAgentSpeaking(speakers.some(s => !s.isLocal))
+      onUserSpeaking(speakers.some(s => s.isLocal))
+    }
+
+    const onData = (data: Uint8Array) => {
+      try {
+        const payload = JSON.parse(new TextDecoder().decode(data)) as { type?: string; card?: MiniCardData }
+        if (payload.type === 'mini_card' && payload.card) onCard(payload.card)
+      } catch { /* ignore */ }
+    }
+
+    room.on(RoomEvent.TranscriptionReceived, onTranscript)
+    room.on(RoomEvent.ActiveSpeakersChanged, onSpeakers)
+    room.on(RoomEvent.DataReceived, onData)
+    return () => {
+      room.off(RoomEvent.TranscriptionReceived, onTranscript)
+      room.off(RoomEvent.ActiveSpeakersChanged, onSpeakers)
+      room.off(RoomEvent.DataReceived, onData)
+    }
+  }, [room, onTranscription, onAgentSpeaking, onUserSpeaking, onCard])
+
+  return null
 }

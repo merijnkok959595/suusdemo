@@ -45,6 +45,10 @@ export async function POST() {
     })
 
     return NextResponse.json({
+      // New shape expected by @livekit/components-react LiveKitRoom
+      server_url:        LIVEKIT_URL,
+      participant_token: token,
+      // Keep legacy fields for backward compat
       token,
       roomName,
       url: LIVEKIT_URL,
