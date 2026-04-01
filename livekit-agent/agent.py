@@ -365,12 +365,6 @@ class SuusRouter(Agent):
             tools=make_router_tools(state),
         )
 
-    async def on_enter(self) -> None:
-        await self.session.say(
-            "Hoi! Ik ben SUUS. "
-            "Noem de bedrijf- en plaatsnaam, dan help ik je direct verder."
-        )
-
 
 class SuzyContactResolver(Agent):
     def __init__(self, state: CallState, initial_query: str = "") -> None:
@@ -379,9 +373,6 @@ class SuzyContactResolver(Agent):
             instructions=prompt,
             tools=make_contact_tools(state),
         )
-
-    async def on_enter(self) -> None:
-        pass  # SUZY start meteen met zoeken vanuit de prompt, geen extra begroeting
 
 
 class SusanneAction(Agent):
@@ -406,7 +397,10 @@ class SusanneAction(Agent):
             "contact_update": f"Wat moet ik aanpassen voor {name}?",
         }
         msg = greetings.get(intent, f"Ik heb {name} gevonden. Waarmee kan ik je helpen?")
-        await self.session.say(msg)
+        try:
+            await self.session.say(msg)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("SusanneAction.on_enter say() failed: %s", exc)
 
 
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
@@ -430,6 +424,13 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     await session.start(room=ctx.room, agent=router)
+
+    # Greeting directly on the session — safer than on_enter for the initial agent
+    logger.info("Sending opening greeting")
+    await session.say(
+        "Hoi! Ik ben SUUS. "
+        "Noem de bedrijf- en plaatsnaam, dan help ik je direct verder."
+    )
 
 
 # ─── Entry ────────────────────────────────────────────────────────────────────
