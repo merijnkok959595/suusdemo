@@ -6,3 +6,4 @@ livekit-plugins-elevenlabs>=1.5.1
 livekit-plugins-turn-detector>=1.5.1
 aiohttp>=3.9.0
 python-dotenv>=1.0.0
+sentry-sdk>=2.0.0

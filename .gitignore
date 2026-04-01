@@ -25,3 +25,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 livekit-agent/.env
+livekit-agent/.env.production
+.vercel
+.env*.local

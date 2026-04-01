@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from typing import Annotated
 
 import aiohttp
+import sentry_sdk
 from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import (
@@ -41,10 +42,14 @@ from livekit.agents.beta.workflows import TaskGroup
 from livekit.plugins import deepgram, elevenlabs
 from livekit.plugins import openai as openai_plugin
 from livekit.plugins import silero
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
+
+sentry_sdk.init(
+    dsn=os.environ.get("SENTRY_DSN", ""),
+    traces_sample_rate=0.2,
+)
 
 NEXT_API_URL = os.environ.get("NEXT_API_URL", "http://localhost:3000")
 DEMO_ORG_ID  = os.environ.get("DEMO_ORG_ID", "")
@@ -52,15 +57,16 @@ DEMO_ORG_ID  = os.environ.get("DEMO_ORG_ID", "")
 # Pre-load heavy models once at worker startup — avoids AssignmentTimeoutError
 # on first job dispatch (LiveKit Cloud times out if child process is too slow to init)
 logger.info("Pre-loading VAD model...")
-_VAD = silero.VAD.load()
+_VAD = silero.VAD.load(
+    # 1.1 s — sales reps pause mid-sentence; default 550 ms is too aggressive.
+    min_silence_duration=1.1,
+    prefix_padding_duration=0.5,
+    # Raise activation threshold slightly to reduce noise-triggered false starts.
+    activation_threshold=0.6,
+    deactivation_threshold=0.4,
+)
 logger.info("VAD model ready")
 
-try:
-    _TURN_DETECTOR = MultilingualModel()
-    logger.info("MultilingualModel ready")
-except Exception as e:
-    _TURN_DETECTOR = None
-    logger.warning("MultilingualModel not available (PyTorch missing?): %s", e)
 
 
 # ─── Shared call state ────────────────────────────────────────────────────────
@@ -139,12 +145,13 @@ async def call_crm_tool(
         "call":      {"metadata": {"organization_id": state.org_id}},
     }
     try:
-        http    = state.http or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
+        http    = state.http or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25, connect=3, sock_read=12))
         managed = state.http is None  # close only if we created it
         try:
             async with http.post(f"{NEXT_API_URL}/api/voice/tool", json=payload) as resp:
                 data   = await resp.json()
                 result = str(data.get("result", ""))
+                await _audit_log(tool_name, args, result, state)
                 card   = data.get("card")
                 if card and push_card and state.room:
                     try:
@@ -159,7 +166,33 @@ async def call_crm_tool(
                 await http.close()
     except Exception as exc:
         logger.error("call_crm_tool %s failed: %s", tool_name, exc)
+        sentry_sdk.set_context("crm_call", {"tool": tool_name, "room": state.room_name, "org": state.org_id})
+        sentry_sdk.capture_exception(exc)
         return f'{{"error": "{exc}"}}'
+
+
+# ─── Audit log ────────────────────────────────────────────────────────────────
+
+_WRITE_TOOLS = {
+    "note_create", "task_create", "appointment_create",
+    "log_bezoek", "contact_create", "contact_update",
+}
+
+
+async def _audit_log(tool: str, args: dict, result: str, state: CallState) -> None:
+    if tool not in _WRITE_TOOLS:
+        return
+    try:
+        await state.http.post(f"{NEXT_API_URL}/api/voice/audit", json={  # type: ignore[union-attr]
+            "org_id": state.org_id,
+            "room":   state.room_name,
+            "tool":   tool,
+            "args":   {k: v for k, v in args.items() if not k.startswith("_")},
+            "result": result,
+            "ts":     datetime.utcnow().isoformat(),
+        })
+    except Exception as exc:
+        logger.warning("Audit log failed (non-fatal): %s", exc)
 
 
 # ─── Date context helper ──────────────────────────────────────────────────────
@@ -182,7 +215,7 @@ class CollectIntentTask(AgentTask[IntentResult]):
 
     def __init__(self) -> None:
         super().__init__(
-            llm=openai_plugin.LLM(model="gpt-4.1-mini", temperature=0.0),
+            llm=openai_plugin.LLM(model="gpt-4.1", temperature=0.0),
             instructions=f"""
 Je bent SUUS. Detecteer de intent van de gebruiker en roep DIRECT intent_detected aan.
 
@@ -199,6 +232,7 @@ TWEE BRANCHES:
 - nieuw_contact       → "voeg X toe", "nieuw bedrijf"
 
 ── PERSOONLIJK (geen klant nodig) ───────────────────────────────
+- persoonlijk          → "persoonlijk", "voor mezelf", "voor mij", "eigen" ZONDER specifieke actie
 - persoonlijke_notitie → "notitie voor mezelf", "onthouden", "persoonlijke notitie", notitie ZONDER bedrijf
 - persoonlijke_taak    → "taak voor mezelf", "reminder voor mij", "persoonlijke taak", taak ZONDER bedrijf
 - vrije_afspraak       → "afspraak plannen" ZONDER bedrijf, "agenda", persoonlijke afspraak
@@ -208,18 +242,22 @@ TWEE BRANCHES:
 
 BESLISSINGSREGELS — in volgorde:
 
-1. Bedrijfsnaam aanwezig (of "ik was bij X", "voor X") → CRM-intent + company_query invullen. DIRECT intent_detected aanroepen.
-2. "mezelf", "voor mij", "persoonlijk", "mijn agenda", "eigen" aanwezig → persoonlijke intent. DIRECT intent_detected aanroepen.
+0. Als de gebruiker ALLEEN aangeeft "met een klant" of "voor een klant" (geen bedrijf, geen actie), vraag dan ALLEEN: "Noem bedrijfsnaam en plaatsnaam." — wacht op het antwoord, dan intent_detected met intent="na_bezoek". NOOIT naar actie vragen — dat doet een volgende stap.
+1. Bedrijfsnaam DUIDELIJK aanwezig met actie OF stad (bv. "voor [naam]", "[naam] in [stad]", "bij [naam]", "ik was bij [naam]") → CRM-intent + company_query invullen. DIRECT intent_detected aanroepen.
+2. "mezelf", "voor mij", "persoonlijk", "mijn agenda", "eigen" aanwezig:
+   - Met specifieke actie (notitie/taak/agenda) → gebruik persoonlijke_notitie / persoonlijke_taak / vrije_afspraak.
+   - Zonder specifieke actie → intent="persoonlijk". DIRECT intent_detected aanroepen.
 3. ALLEEN een bedrijfsnaam + stad zonder verdere context → "na_bezoek" + company_query. DIRECT intent_detected aanroepen.
 4. Actiewoord aanwezig (notitie/taak/afspraak) MAAR geen bedrijf EN geen persoonlijk signaal → Stel EEN korte vraag: "Is dit voor een klant of voor jezelf?" — wacht op antwoord, dan intent_detected.
-5. Nooit zelf CRM-acties uitvoeren. Nooit bevestigen of aankondigen — alleen intent_detected aanroepen of één disambiguatievraag stellen.
+5. Garbled/onbegrijpelijke/onvolledige input → NEGEER, wacht rustig op een duidelijke volgende uiting. NOOIT intent_detected aanroepen op ruis.
+6. Nooit zelf CRM-acties uitvoeren. Nooit bevestigen of aankondigen — alleen intent_detected aanroepen of één disambiguatievraag stellen.
 
-Datum/tijd: {_date_ctx()}
 """,
         )
 
     async def on_enter(self) -> None:
-        pass  # SuusAgent already greeted; just wait for user speech
+        # Inject current date/time at call time, not at worker-startup time.
+        self.update_instructions(self.instructions + f"\nDatum/tijd: {_date_ctx()}")
 
     @function_tool
     async def intent_detected(
@@ -257,7 +295,7 @@ Je bent SUUS CONTACT. Voer STRIKT in volgorde uit:
 
 STAP 0: Heb je al een bedrijfsnaam in de context?
   - Ja → ga direct naar STAP 1.
-  - Nee → vraag EENMALIG: "Voor welk bedrijf?"
+  - Nee → vraag EENMALIG: "Noem bedrijfsnaam en plaatsnaam."
 
 STAP 1: Roep DIRECT google_enrich(bedrijfsnaam + stad) aan. Geen aankondiging.
 
@@ -367,14 +405,16 @@ KRITIEKE REGELS:
         if state.room:
             try:
                 card = {
-                    "type":     "contact_found",
-                    "id":       contact_id,
-                    "title":    contact_company,
-                    "subtitle": contact_name,
-                    "meta":     state.contact_address or None,
+                    "type":      "contact_found",
+                    "id":        contact_id,
+                    "contactId": contact_id,
+                    "title":     contact_company,
+                    "subtitle":  contact_name,
+                    "meta":      state.contact_address or None,
                 }
                 packet = json.dumps({"type": "mini_card", "card": card}).encode()
                 await state.room.local_participant.publish_data(packet, reliable=True)
+                logger.info(json.dumps({"event": "card_pushed", "type": "contact_found", "contact": contact_company, "room": state.room_name}))
             except Exception as exc:
                 logger.warning("Confirmed card push failed: %s", exc)
 
@@ -424,6 +464,39 @@ ANNULEREN:
 
 GEBRUIK ALLEEN de tools hieronder. GEEN andere tools. GEEN eigen CRM-acties.
 """,
+            # Dedicated STT for structured form input:
+            # - smart_format=True: formats dates ("15 april" → "15-04"), numbers, and
+            #   boolean words cleanly — safe here because we're not capturing company names.
+            # - Tighter keyterm list focused on the specific values expected per question.
+            stt=deepgram.STT(
+                model="nova-3",
+                language="nl",
+                smart_format=True,    # formats dates/numbers — intentionally ON here
+                no_delay=True,        # don't wait for full sequence before returning
+                numerals=True,
+                punctuate=True,
+                filler_words=False,
+                keyterm=[
+                    # ── Vraag 2: vervolgactie ────────────────────────────────────
+                    "taak", "afspraak", "geen", "vervolgafspraak", "herinnering",
+                    "volgende week", "morgen", "overmorgen", "maandag", "dinsdag",
+                    "woensdag", "donderdag", "vrijdag",
+                    # ── Vraag 3: klanttype ───────────────────────────────────────
+                    "prospect", "klant",
+                    # ── Vraag 4: groothandel ─────────────────────────────────────
+                    "groothandel", "Sligro", "Makro", "Bidfood", "Hanos",
+                    "Van Hoeckel", "Metro", "Deli XL", "Lekkerland",
+                    # ── Vraag 5-6: ja/nee ────────────────────────────────────────
+                    "ja", "nee", "geplaatst", "gemaakt", "geen",
+                    "POS materiaal", "kortingafspraken", "korting",
+                    # ── Vraag 7: producten ───────────────────────────────────────
+                    "wijn", "bier", "gin", "tonic", "whisky", "rum", "vodka",
+                    "champagne", "prosecco", "cocktail", "mocktail",
+                    "non-alcoholisch", "frisdrank", "water", "koffie",
+                    # ── Annuleren ────────────────────────────────────────────────
+                    "annuleer", "stoppen", "terug naar menu",
+                ],
+            ),
         )
         self._data = BezoekData()
 
@@ -520,40 +593,94 @@ class ExecuteActionTask(AgentTask[ActionResult]):
             "contact_update",
             "persoonlijke_notitie", "persoonlijke_taak",
         )
-        self._na_bezoek  = state.intent == "na_bezoek"
+        self._is_personal = state.intent in (
+            "persoonlijk", "vrije_afspraak", "persoonlijke_notitie", "persoonlijke_taak",
+        )
 
         intent_map = {
-            "pre_bezoek":     "Roep DIRECT _contact_briefing aan. Presenteer max 3 zinnen.",
-            "na_bezoek":      "",  # handled via LogBezoekTask in on_enter
+            # ── Direct tool triggers (no menu needed) ──────────────────────────
+            "pre_bezoek": (
+                "Roep DIRECT _contact_briefing aan — GEEN tekst vooraf, GEEN aankondiging. "
+                "Presenteer de briefing in max 3 zinnen, roep daarna action_completed aan."
+            ),
+            "briefing": (
+                "Roep DIRECT _contact_briefing aan — GEEN tekst vooraf, GEEN aankondiging. "
+                "Presenteer de briefing in max 3 zinnen, roep daarna action_completed aan."
+            ),
+
+            # ── na_bezoek: CRM action menu ─────────────────────────────────────
+            "na_bezoek": (
+                "Stel DIRECT de vaste vraag: "
+                "'Wat wil je doen? Bezoek loggen, briefing, notitie, taak, of agenda?'\n"
+                "Wacht op het antwoord. Roep dan DIRECT het juiste tool aan — GEEN tekst, GEEN bevestiging:\n"
+                "- 'bezoek loggen' of 'loggen' of 'bezoek' → log_bezoek_start() — DIRECT, geen extra vraag\n"
+                "- 'briefing' → _contact_briefing()\n"
+                "- 'notitie' → vraag 'Wat moet ik vastleggen?' → wacht → bevestig 'Ik ga noteren: [inhoud] — klopt dit?' → na ja: _note_create()\n"
+                "- 'taak' → vraag 'Wat en wanneer?' → wacht → _task_create()\n"
+                "- 'agenda' of 'afspraak' → vraag 'Wanneer en hoe laat?' → wacht → _appointment_create()\n"
+                "NOOIT een vrije tekstreactie geven. ALTIJD een tool aanroepen."
+            ),
+
+            # ── Direct CRM actions (contact already resolved) ──────────────────
             "notitie": (
-                "STAP 1: Vraag 'Wat moet ik vastleggen?' — NIETS opslaan tot je antwoord hebt.\n"
-                "STAP 2: Wacht op de inhoud van de gebruiker.\n"
-                "STAP 3: Herhaal de tekst: 'Ik ga noteren: [inhoud] — klopt dit?'\n"
-                "STAP 4: Na bevestiging → _note_create(body=[inhoud]).\n"
-                "Sla NOOIT op zonder dat de gebruiker de inhoud heeft doorgegeven."
+                "STAP 1: Vraag DIRECT 'Wat moet ik vastleggen?' — GEEN andere tekst.\n"
+                "STAP 2: Wacht op de inhoud.\n"
+                "STAP 3: Zeg EXACT: 'Ik ga noteren: [inhoud] — klopt dit?'\n"
+                "STAP 4: Na 'ja' of bevestiging → _note_create(body=[inhoud]) — DIRECT, GEEN extra tekst.\n"
+                "Sla NOOIT op zonder bevestiging. NOOIT vrije tekst tussendoor."
             ),
-            "taak":           "Vraag 'Wat en wanneer?' (standaard morgen 09:00) → _task_create.",
-            "afspraak":       (
-                f"Afspraak bij {state.contact_company} "
-                + (f"(locatie: {state.contact_address}). " if state.contact_address else ". ")
-                + "Vraag ALLEEN: 'Wanneer en hoe laat?' — locatie is al bekend. → _appointment_create."
+            "taak": (
+                "Vraag DIRECT 'Wat is de taak en wanneer?' (standaard morgen 09:00 als geen datum).\n"
+                "Wacht op het antwoord. Roep dan DIRECT _task_create aan — GEEN bevestigingsvraag, GEEN extra tekst."
             ),
-            "vrije_afspraak": (
-                "Vrije afspraak (geen vast contact). "
-                "Vraag: (1) Onderwerp? (2) Met wie / locatie? (gebruik _location_lookup voor adres) (3) Wanneer en hoe laat? → _appointment_create met contactId leeg."
+            "afspraak": (
+                f"Afspraak bij {state.contact_company}"
+                + (f" (locatie: {state.contact_address})." if state.contact_address else ".")
+                + " Vraag DIRECT 'Wanneer en hoe laat?' — locatie is al bekend, NIET opnieuw vragen.\n"
+                "Wacht op het antwoord. Roep dan DIRECT _appointment_create aan — GEEN bevestigingsvraag."
             ),
-            "briefing":       "Roep DIRECT _contact_briefing aan.",
-            "contact_update": "Vraag 'Welke gegevens?' → _contact_update.",
-            "nieuw_contact":  "Contact is aangemaakt. Vraag 'Notitie of taak toevoegen?'",
+            "contact_update": (
+                "Vraag DIRECT 'Welke gegevens wil je aanpassen?'.\n"
+                "Wacht op het antwoord. Roep dan DIRECT _contact_update aan."
+            ),
+            "nieuw_contact": (
+                "Contact is aangemaakt. Vraag DIRECT 'Wil je een notitie of taak toevoegen?'\n"
+                "Wacht op het antwoord. Roep dan DIRECT het juiste tool aan:\n"
+                "- 'notitie' → vraag inhoud → _note_create()\n"
+                "- 'taak' → vraag wat/wanneer → _task_create()\n"
+                "- 'nee' of 'klaar' → action_completed()\n"
+                "NOOIT vrije tekst. ALTIJD een tool aanroepen."
+            ),
+
+            # ── Personal menu ──────────────────────────────────────────────────
+            "persoonlijk": (
+                "Stel DIRECT de vaste vraag: 'Kan ik iets in je agenda zetten, notitie maken, of een taak aanmaken?'\n"
+                "Wacht op het antwoord. Roep dan DIRECT het juiste tool aan — GEEN tekst, GEEN bevestiging:\n"
+                "- 'notitie' of 'onthouden' → vraag 'Wat wil je onthouden?' → wacht → _note_create()\n"
+                "- 'taak' of 'herinnering' → vraag 'Wat en wanneer?' → wacht → _task_create()\n"
+                "- 'agenda' of 'afspraak' → vraag 'Wanneer en wat?' → wacht → _appointment_create()\n"
+                "- 'terug' of 'hoofdmenu' of 'met een klant' → action_completed(summary='RESET') — DIRECT\n"
+                "NOOIT vrije tekst. ALTIJD een tool aanroepen."
+            ),
             "persoonlijke_notitie": (
-                "Persoonlijke notitie (geen contact).\n"
-                "STAP 1: Vraag 'Wat wil je onthouden?' — NIETS opslaan voor je antwoord hebt.\n"
-                "STAP 2: Herhaal: 'Ik noteer: [inhoud] — klopt dit?'\n"
-                "STAP 3: Na bevestiging → _note_create(body=[inhoud]) met lege contactId."
+                "STAP 1: Vraag DIRECT 'Wat wil je onthouden?' — GEEN andere tekst.\n"
+                "STAP 2: Wacht op de inhoud.\n"
+                "STAP 3: Zeg EXACT: 'Ik noteer: [inhoud] — klopt dit?'\n"
+                "STAP 4: Na 'ja' of bevestiging → _note_create(body=[inhoud]) met lege contactId — DIRECT.\n"
+                "- 'terug' of 'hoofdmenu' of 'met een klant' → action_completed(summary='RESET') — DIRECT.\n"
+                "NOOIT vrije tekst tussendoor."
             ),
             "persoonlijke_taak": (
-                "Persoonlijke taak (geen contact).\n"
-                "Vraag: (1) Wat is de taak? (2) Wanneer? (standaard morgen 09:00) → _task_create met lege contactId."
+                "Vraag DIRECT 'Wat is de taak en wanneer?' (standaard morgen 09:00).\n"
+                "Wacht op het antwoord. Roep dan DIRECT _task_create aan met lege contactId — GEEN bevestigingsvraag.\n"
+                "- 'terug' of 'hoofdmenu' of 'met een klant' → action_completed(summary='RESET') — DIRECT."
+            ),
+            "vrije_afspraak": (
+                "Vrije afspraak (geen vast contact).\n"
+                "Vraag DIRECT: 'Wat is het onderwerp, met wie of waar, en wanneer?'\n"
+                "Wacht op het antwoord. Gebruik _location_lookup voor het adres indien nodig.\n"
+                "Roep dan DIRECT _appointment_create aan met lege contactId — GEEN bevestigingsvraag.\n"
+                "- 'terug' of 'hoofdmenu' of 'met een klant' → action_completed(summary='RESET') — DIRECT."
             ),
         }
         intent_instruction = intent_map.get(
@@ -562,8 +689,7 @@ class ExecuteActionTask(AgentTask[ActionResult]):
             "Bezoek loggen, briefing, notitie, taak, of afspraak?'",
         )
 
-        _is_personal = state.intent in ("vrije_afspraak", "persoonlijke_notitie", "persoonlijke_taak")
-        if _is_personal:
+        if self._is_personal:
             ctx_header = "Je bent SUUS MANAGER. Persoonlijke actie (geen CRM-contact). contactId is leeg — gebruik dat zo in tool calls."
         elif state.contact_company:
             ctx_header = (
@@ -578,11 +704,11 @@ class ExecuteActionTask(AgentTask[ActionResult]):
 TAAK: {intent_instruction}
 
 REGELS:
-- Bevestig schrijfacties vóór uitvoering: "Ik ga [actie] aanmaken — klopt dit?"
-- Na voltooiing: roep action_completed aan met een korte samenvatting.
-- Geen technische IDs tonen.
+- Volg de TAAK-instructie LETTERLIJK. NOOIT vrije tekst genereren buiten de aangegeven vragen.
+- Roep altijd het juiste tool aan — GEEN alternatieve tekstreactie.
+- Na voltooiing van de actie: roep action_completed aan met een korte samenvatting.
+- Geen technische IDs tonen aan de gebruiker.
 
-Datum/tijd: {_date_ctx()}
 """
         super().__init__(
             instructions=instructions,
@@ -590,48 +716,44 @@ Datum/tijd: {_date_ctx()}
                 _contact_briefing, _note_create, _task_create,
                 _appointment_create, _contact_update,
                 _task_list, _appointment_list, _location_lookup,
+                # log_bezoek_start is a method tool — declared below on the class
             ],
         )
 
     async def on_enter(self) -> None:
+        # Inject current date/time at call time, not at worker-startup time.
+        self.update_instructions(self.instructions + f"\nDatum/tijd: {_date_ctx()}")
+
         if self._intent == "reset":
             # Nothing to do — SuusAgent loop will handle the fresh greeting
             self.complete(ActionResult(summary="reset"))
             return
 
-        if self._na_bezoek:
-            # Delegate to dedicated task — no CRM tools exposed, LLM can't stray
-            data: BezoekData = await LogBezoekTask()
-
-            if data.geannuleerd:
-                # User cancelled → drop back to the action menu
-                await self.session.say(
-                    "Oké, bezoeklog geannuleerd. "
-                    "Wat wil je doen? Bezoek loggen, briefing, notitie, agenda, of taak aanmaken?"
-                )
-                return  # on_enter returns; ExecuteActionTask stays active, LLM handles next turn
-
-            args: dict = {
-                "contactId":    self._state.contact_id,
-                "companyName":  self._state.contact_company,
-                "samenvatting": data.uitkomst,
-            }
-            if data.producten:                      args["producten"]         = data.producten
-            if data.klant_type:                     args["klantType"]         = data.klant_type
-            if data.vervolg_actie:                  args["vervolgActie"]      = data.vervolg_actie
-            if data.vervolg_datum:                  args["vervolgDatum"]      = data.vervolg_datum
-            if data.groothandel:                    args["groothandel"]       = data.groothandel
-            if data.pos_materiaal is not None:      args["pos_materiaal"]     = data.pos_materiaal
-            if data.korting_afspraken is not None:  args["korting_afspraken"] = data.korting_afspraken
-            await call_crm_tool("log_bezoek", args, self._state)
-            await self.session.say("Bezoek gelogd!")
-            self.complete(ActionResult(summary=f"Bezoek gelogd voor {self._state.contact_company}"))
-        elif self._auto_start:
-            self.session.generate_reply()  # immediately calls briefing tool
-        else:
+        if self._auto_start:
+            self.session.generate_reply()  # triggers the primary tool immediately (briefing, notitie, etc.)
+        elif self._is_personal:
+            # Generic personal branch — always show a fixed menu first
             await self.session.say(
-                "Wat wil je doen? Bezoek loggen, briefing, notitie, agenda, of taak aanmaken?"
+                "Kan ik iets in je agenda zetten of een persoonlijke notitie maken?"
             )
+        else:
+            # CRM branch (na_bezoek or unknown) — show the CRM action menu
+            await self.session.say(
+                "Wat wil je doen? Bezoek loggen, briefing, notitie, taak, of agenda?"
+            )
+
+    @function_tool
+    async def log_bezoek_start(
+        self,
+        context: RunContext_T,
+    ) -> str:
+        """Start het stap-voor-stap loggen van een klantbezoek. Roep aan zodra de gebruiker 'bezoek loggen' kiest."""
+        # LogBezoekTask cannot be awaited from inside a function-tool coroutine because
+        # function-tool tasks do not have inline_task=True in their activity context.
+        # Signal BEZOEK_START through the ActionResult; SuusAgent.on_enter handles it
+        # at the top-level loop where inline_task=True is guaranteed.
+        self.complete(ActionResult(summary="BEZOEK_START"))
+        return "BEZOEK_START"
 
     @function_tool
     async def action_completed(
@@ -694,30 +816,6 @@ async def _appointment_create(
     if notes:    args["notes"]    = notes
     return await call_crm_tool("appointment_create", args, state)
 
-
-@function_tool
-async def _log_bezoek(
-    samenvatting:      Annotated[str, "Uitkomst / samenvatting van het bezoek"],
-    context:           RunContext_T,
-    producten:         Annotated[str | None, "Producten waarmee zij werken"] = None,
-    klantType:         Annotated[str | None, "lead | klant"] = None,
-    vervolgActie:      Annotated[str | None, "taak | afspraak | geen"] = None,
-    vervolgDatum:      Annotated[str | None, "ISO 8601 datum voor vervolg"] = None,
-    groothandel:       Annotated[str | None, "Groothandel waar klant bestelt"] = None,
-    pos_materiaal:     Annotated[bool | None, "POS-materiaal geplaatst (true/false)"] = None,
-    korting_afspraken: Annotated[bool | None, "Kortingafspraken gemaakt (true/false)"] = None,
-) -> str:
-    """Log bezoek: notitie + vervolgacties + klantgegevens."""
-    state = context.userdata
-    args: dict = {"contactId": state.contact_id, "samenvatting": samenvatting}
-    if producten:                        args["producten"]         = producten
-    if klantType:                        args["klantType"]         = klantType
-    if vervolgActie:                     args["vervolgActie"]      = vervolgActie
-    if vervolgDatum:                     args["vervolgDatum"]      = vervolgDatum
-    if groothandel:                      args["groothandel"]       = groothandel
-    if pos_materiaal is not None:        args["pos_materiaal"]     = pos_materiaal
-    if korting_afspraken is not None:    args["korting_afspraken"] = korting_afspraken
-    return await call_crm_tool("log_bezoek", args, state)
 
 
 @function_tool
@@ -786,37 +884,10 @@ class SuusAgent(Agent):
 
     async def on_enter(self) -> None:
         state: CallState = self.session.userdata
-
-        # Two-stage silence handling:
-        #  10 s silence → "Ben je er nog?"  (resets if user speaks)
-        #  +8 s silence → "Tot ziens!" + hang up  (18 s total)
-        SILENCE_WARN = 10.0
-        SILENCE_END  =  8.0
-        _silence_gen  = 0   # increment to invalidate any in-flight pipeline
-
-        async def _silence_pipeline(gen: int) -> None:
-            await asyncio.sleep(SILENCE_WARN)
-            if gen != _silence_gen:
-                return   # user spoke — abort
-            logger.info("Silence warn")
-            await self.session.say("Ben je er nog?")
-            await asyncio.sleep(SILENCE_END)
-            if gen != _silence_gen:
-                return   # user spoke after the warning — abort
-            logger.info("Silence end — ending call")
-            await self.session.say("Geen reactie ontvangen. Tot ziens!")
-            self.session.shutdown(reason="silence-timeout")
-
-        def _reset_silence_timer(*_: object) -> None:
-            nonlocal _silence_gen
-            _silence_gen += 1                                   # invalidate previous pipeline
-            asyncio.create_task(_silence_pipeline(_silence_gen))
-
-        # Start timer only AFTER greeting; reset on every committed utterance
-        self.session.on("user_speech_committed", _reset_silence_timer)
+        logger.info(json.dumps({"event": "on_enter_fired", "room": state.room_name}))
 
         await self.session.say("Hoi met SUUS! Wil je persoonlijk iets doen of met een klant?")
-        _reset_silence_timer()  # start counting only after greeting is done
+        logger.info(json.dumps({"event": "greeting_sent", "room": state.room_name}))
 
         while True:
             task_group = TaskGroup(
@@ -840,19 +911,69 @@ class SuusAgent(Agent):
             )
 
             try:
+                _ = asyncio.current_task()
                 results = await task_group
                 action: ActionResult | None = results.task_results.get("execute_action")  # type: ignore[assignment]
                 if action:
                     logger.info("Cycle complete: %s", action.summary)
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
                 logger.error("TaskGroup cycle failed: %s", exc)
-                await self.session.say("Er is iets misgegaan. Probeer het opnieuw.")
+                sentry_sdk.capture_exception(exc)
+                try:
+                    await self.session.say("Er is iets misgegaan. Probeer het opnieuw.")
+                except Exception:
+                    break  # session is shutting down (e.g. silence timeout fired) — exit cleanly
                 continue  # don't break the loop — try again
 
+            # ── BEZOEK_START: LogBezoekTask must run here (on_enter has inline_task=True) ──
+            if action and action.summary == "BEZOEK_START":
+                logger.info("BEZOEK_START received — launching LogBezoekTask")
+                try:
+                    data: BezoekData = await LogBezoekTask()
+                    logger.info("LogBezoekTask completed, geannuleerd=%s", data.geannuleerd)
+                except Exception as exc:
+                    logger.error("LogBezoekTask failed: %s", exc, exc_info=True)
+                    await self.session.say("Er ging iets mis met het loggen. Probeer opnieuw.")
+                    state.intent = ""
+                    state.company_query = ""
+                    continue
+                if not data.geannuleerd:
+                    bezoek_args: dict = {
+                        "contactId":    state.contact_id,
+                        "companyName":  state.contact_company,
+                        "samenvatting": data.uitkomst,
+                    }
+                    if data.producten:                      bezoek_args["producten"]         = data.producten
+                    if data.klant_type:                     bezoek_args["klantType"]         = data.klant_type
+                    if data.vervolg_actie:                  bezoek_args["vervolgActie"]      = data.vervolg_actie
+                    if data.vervolg_datum:                  bezoek_args["vervolgDatum"]      = data.vervolg_datum
+                    if data.groothandel:                    bezoek_args["groothandel"]       = data.groothandel
+                    if data.pos_materiaal is not None:      bezoek_args["pos_materiaal"]     = data.pos_materiaal
+                    if data.korting_afspraken is not None:  bezoek_args["korting_afspraken"] = data.korting_afspraken
+                    await call_crm_tool("log_bezoek", bezoek_args, state)
+                    await self.session.say("Bezoek gelogd!")
+                else:
+                    await self.session.say(
+                        "Bezoeklog geannuleerd. "
+                        "Wat wil je doen? Bezoek loggen, briefing, notitie, taak, of agenda?"
+                    )
+                state.intent        = ""
+                state.company_query = ""
+                continue  # skip end-of-cycle prompt — loop back directly
+
             # Reset intent/query for next cycle
-            was_reset = state.intent == "reset"
+            was_reset = (
+                state.intent == "reset"
+                or bool(action and action.summary == "RESET")
+            )
             state.intent        = ""
             state.company_query = ""
+            if was_reset:
+                state.contact_company = ""
+                state.contact_id      = ""
+                state.contact_address = ""
 
             if was_reset or not state.contact_company:
                 await self.session.say("Wil je persoonlijk iets doen of met een klant?")
@@ -868,21 +989,44 @@ class SuusAgent(Agent):
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
+    # Guard against duplicate dispatch: exit if another SUUS agent is already active.
+    # This can happen when LiveKit Cloud auto-dispatch fires alongside an explicit dispatch.
+    existing_agents = [
+        p for p in ctx.room.remote_participants.values()
+        if getattr(p, "kind", None) == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+    ]
+    if existing_agents:
+        logger.warning(json.dumps({
+            "event": "duplicate_agent_exit",
+            "room":  ctx.room.name,
+            "other": [p.identity for p in existing_agents],
+        }))
+        return
+
     org_id    = (ctx.room.metadata or "").strip() or DEMO_ORG_ID
     room_name = ctx.room.name
-    logger.info("SUUS agent started  room=%s  org=%s", room_name, org_id)
+    logger.info(json.dumps({
+        "event": "call_start",
+        "room":  room_name,
+        "org":   org_id,
+        "ts":    datetime.utcnow().isoformat(),
+    }))
 
     state = CallState(
         org_id=org_id,
         room_name=room_name,
         room=ctx.room,
-        http=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)),
+        http=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25, connect=3, sock_read=12)),
     )
 
+    # VAD interruption fires as soon as speech is detected — more responsive than
+    # adaptive (which needs ~1s of audio to classify). Better for short commands like "stop".
+    # Dynamic endpointing: min_delay 1.1s gives room for Dutch compound words and
+    # mid-sentence hesitations without being too sluggish.
     turn_handling = TurnHandlingOptions(
-        turn_detection=_TURN_DETECTOR,
-        interruption={"mode": "adaptive" if _TURN_DETECTOR else "vad"},
-    ) if _TURN_DETECTOR else None
+        interruption={"mode": "vad"},
+        endpointing={"mode": "dynamic", "min_delay": 0.6, "max_delay": 4.0},
+    )
 
     session = AgentSession[CallState](
         userdata=state,
@@ -890,7 +1034,24 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=deepgram.STT(
             model="nova-3",
             language="nl",
-            smart_format=True,
+            smart_format=False,
+            numerals=True,
+            punctuate=True,
+            filler_words=False,
+            keyterm=[
+                "bezoek", "bezoek loggen", "briefing", "notitie", "taak",
+                "afspraak", "agenda", "loggen", "aanmaken", "opzoeken",
+                "samenvatting", "vervolg", "vervolgactie", "follow-up",
+                "lead", "klant", "prospect", "groothandel", "horeca",
+                "contactpersoon", "bedrijf", "organisatie",
+                "korting", "kortingafspraken", "pos materiaal",
+                "juist", "precies", "klopt", "correct", "exact",
+                "annuleren", "geannuleerd", "stoppen",
+                "Amsterdam", "Rotterdam", "Utrecht", "Den Haag", "Eindhoven",
+                "Groningen", "Tilburg", "Almere", "Breda", "Nijmegen",
+                "Haarlem", "Arnhem", "Zaandam", "Amersfoort", "Apeldoorn",
+                "Risottini", "SUUS",
+            ],
         ),
         llm=openai_plugin.LLM(model="gpt-4.1", temperature=0.0),
         tts=elevenlabs.TTS(
@@ -898,10 +1059,10 @@ async def entrypoint(ctx: JobContext) -> None:
             voice_id="XJa38TJgDqYhj5mYbSJA",
             language="nl",
             voice_settings=elevenlabs.VoiceSettings(
-                stability=0.55,
-                similarity_boost=0.80,
-                style=0.20,
-                speed=1.05,
+                stability=0.75,        # more consistent pronunciation of company names
+                similarity_boost=0.75, # slight reduction prevents over-processing
+                style=0.0,             # style adds latency and occasional artifacts
+                speed=1.0,             # slower = clearer, especially for confirmations
             ),
         ),
         **( {"turn_handling": turn_handling} if turn_handling else {} ),
@@ -909,9 +1070,16 @@ async def entrypoint(ctx: JobContext) -> None:
 
     agent = SuusAgent()
     await session.start(room=ctx.room, agent=agent)
+    logger.info("Session started, agent=%s", agent)
     # on_enter handles greeting + cycle loop
 
     async def _cleanup() -> None:
+        logger.info(json.dumps({
+            "event": "call_end",
+            "room":  room_name,
+            "org":   org_id,
+            "ts":    datetime.utcnow().isoformat(),
+        }))
         if state.http:
             await state.http.close()
 

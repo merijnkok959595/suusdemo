@@ -26,6 +26,7 @@ type Msg = {
   role:          'user' | 'ai'
   text:          string
   streaming?:    boolean
+  segId?:        string        // LiveKit TranscriptionSegment.id — for accurate in-place updates
   image_url?:    string
   briefingData?: BriefingData
   contactsData?: ContactCardData[]
@@ -201,22 +202,22 @@ export default function SuusPage() {
         // New segment — skip empty (e.g. Scribe warmup noise)
         if (!seg.text.trim()) continue
         segmentStateRef.current.set(seg.id, { id: seg.id, text: seg.text, final: seg.final, role })
-        setMsgs(p => [...p, { role, text: seg.text, streaming: !seg.final }])
+        setMsgs(p => [...p, { role, text: seg.text, streaming: !seg.final, segId: seg.id }])
       } else if (existing.text !== seg.text || (seg.final && !existing.final)) {
-        // Update existing segment
+        // Update existing segment — find by segId for correctness when multiple segments stream simultaneously
         segmentStateRef.current.set(seg.id, { ...existing, text: seg.text, final: seg.final })
         setMsgs(p => {
           const next = [...p]
-          // Find last streaming message of same role and update
-          const idx = next.findLastIndex(m => m.streaming && m.role === role)
+          const idx  = next.findLastIndex(m => m.segId === seg.id)
           if (idx >= 0) return [...next.slice(0, idx), { ...next[idx], text: seg.text, streaming: !seg.final }, ...next.slice(idx + 1)]
+          // Fallback for any legacy messages without segId
+          const fallbackIdx = next.findLastIndex(m => m.streaming && m.role === role)
+          if (fallbackIdx >= 0) return [...next.slice(0, fallbackIdx), { ...next[fallbackIdx], text: seg.text, streaming: !seg.final }, ...next.slice(fallbackIdx + 1)]
           return next
         })
       }
 
       if (seg.final) {
-        // Finalise any still-streaming messages for this role
-        setMsgs(p => p.map(m => m.streaming && m.role === role ? { ...m, streaming: false } : m))
         if (isAgent && !greetingDoneRef.current) {
           greetingDoneRef.current = true
           setGreetingDone(true)
@@ -510,7 +511,6 @@ export default function SuusPage() {
           setCallStatus('active')
           greetingDoneRef.current = false
           setGreetingDone(false)
-          if (lkRoom) startCardPolling(lkRoom)
         }}
         onDisconnected={() => stopCall()}
       >
@@ -853,8 +853,11 @@ function LiveKitEvents({
     const onData = (data: Uint8Array) => {
       try {
         const payload = JSON.parse(new TextDecoder().decode(data)) as { type?: string; card?: MiniCardData }
+        console.log('[SUUS] LiveKit data received:', payload)
         if (payload.type === 'mini_card' && payload.card) onCard(payload.card)
-      } catch { /* ignore */ }
+      } catch (e) {
+        console.error('[SUUS] Failed to parse data message:', e)
+      }
     }
 
     // Sync immediately for already-connected agent

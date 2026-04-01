@@ -5,11 +5,12 @@ import { resolveOrgId, adminDb } from '@/lib/auth/resolveOrg'
 export const runtime     = 'nodejs'
 export const maxDuration = 10
 
-const LIVEKIT_URL        = process.env.LIVEKIT_URL!
-const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY!
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET!
-
 export async function POST() {
+  // Read inside handler so hot-reload / env changes always pick up the latest values
+  const LIVEKIT_URL        = process.env.LIVEKIT_URL!
+  const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY!
+  const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET!
+
   try {
     const organizationId = await resolveOrgId()
     if (!organizationId) {
@@ -54,7 +55,8 @@ export async function POST() {
       url: LIVEKIT_URL,
     })
   } catch (err) {
-    console.error('[/api/livekit/token]', err)
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[/api/livekit/token]', msg)
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }
