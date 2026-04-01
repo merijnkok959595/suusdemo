@@ -8,7 +8,6 @@ import { NextResponse } from 'next/server'
 import { adminDb } from '@/lib/auth/resolveOrg'
 import { executeTool } from '@/lib/crm/tools'
 import type { CrmContext } from '@/lib/crm/tools'
-import { addCard } from '@/lib/retell/card-store'
 import type { MiniCardData } from '@/components/ui/MiniCard'
 
 export const runtime     = 'nodejs'
@@ -57,10 +56,8 @@ export async function POST(req: Request) {
       ? await handleLogBezoek(args, ctx)
       : await executeTool(toolName, args, ctx)
 
-    // Build card — returned to agent for data-channel push AND kept in poll store as fallback
-    const card = buildCard(toolName, args, result)
-    const key  = roomName || orgId
-    if (card && key) addCard(key, card)
+    // Build card — returned to agent which pushes it via LiveKit data channel
+    const card = buildCard(toolName, args, result, ctx.userNaam)
 
     return NextResponse.json({ result, card: card ?? null })
   } catch (err) {
@@ -75,38 +72,110 @@ function buildCard(
   name:   string,
   args:   Record<string, unknown>,
   result: string,
+  userNaam?: string,
 ): MiniCardData | null {
   try {
     const parsed = JSON.parse(result)
+
+    // Contact context injected by agent
+    const companyName    = String(args._companyName    ?? '')
+    const contactAddress = String(args._contactAddress ?? '')
+    const contactId      = String(args.contactId       ?? '')
+    const isPersonal     = !contactId   // no contact = personal action
+
+    // For personal cards: show user's name; for CRM: show company
+    const entityTitle    = isPersonal ? (userNaam ?? 'Persoonlijk') : (companyName || contactId)
+    const entityMeta     = isPersonal ? undefined : (contactAddress || undefined)
+
     switch (name) {
       case 'contact_search': {
         if (!parsed?.contacts?.length) return null
         const c = parsed.contacts[0]
-        return { type: 'contact_found', id: c.id ?? '', title: c.bedrijf ?? c.naam ?? 'Contact', subtitle: c.naam ?? undefined, meta: c.stad ?? undefined, contactId: c.id ?? '' }
+        const addr = [c.adres, c.stad].filter(Boolean).join(', ') || undefined
+        return {
+          type: 'contact_found',
+          id: c.id ?? '',
+          title: c.bedrijf ?? c.naam ?? 'Contact',
+          subtitle: c.naam ?? undefined,
+          meta: addr,
+          contactId: c.id ?? '',
+        }
       }
       case 'contact_create': {
         if (!parsed?.success) return null
-        return { type: 'contact_created', id: parsed.id ?? '', title: String(args.companyName ?? ''), subtitle: String(args.firstName ?? '') || undefined, meta: String(args.city ?? '') || undefined, contactId: parsed.id ?? '' }
+        return {
+          type: 'contact_created',
+          id: parsed.id ?? '',
+          title: String(args.companyName ?? ''),
+          subtitle: String(args.firstName ?? '') || undefined,
+          meta: String(args.city ?? '') || undefined,
+          contactId: parsed.id ?? '',
+        }
       }
       case 'note_create': {
         if (!parsed?.success) return null
-        const raw = String(args.body ?? '')
-        const snippet = (raw.charAt(0).toUpperCase() + raw.slice(1)).slice(0, 60) + (raw.length > 60 ? '…' : '')
-        return { type: 'note', id: parsed.id ?? '', title: snippet, contactId: String(args.contactId ?? '') }
+        const raw     = String(args.body ?? '')
+        const snippet = (raw.charAt(0).toUpperCase() + raw.slice(1)).slice(0, 55) + (raw.length > 55 ? '…' : '')
+        return {
+          type: 'note',
+          id: parsed.id ?? '',
+          title: entityTitle,
+          subtitle: snippet,
+          meta: entityMeta,
+          contactId,
+        }
       }
       case 'task_create': {
         if (!parsed?.success) return null
-        const due = args.dueDate ? new Date(String(args.dueDate)).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' }) : undefined
-        return { type: 'task', id: parsed.id ?? '', title: String(args.title ?? ''), contactId: String(args.contactId ?? ''), meta: due }
+        const due = args.dueDate
+          ? new Date(String(args.dueDate)).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+          : undefined
+        return {
+          type: 'task',
+          id: parsed.id ?? '',
+          title: entityTitle,
+          subtitle: String(args.title ?? ''),
+          meta: entityMeta ?? due,
+          contactId,
+        }
       }
       case 'appointment_create': {
         if (!parsed?.success) return null
-        const when = args.startTime ? new Date(String(args.startTime)).toLocaleDateString('nl-NL', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : undefined
-        return { type: 'appointment', id: parsed.id ?? '', title: String(args.title ?? ''), contactId: String(args.contactId ?? ''), meta: when }
+        const when = args.startTime
+          ? new Date(String(args.startTime)).toLocaleDateString('nl-NL', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+          : undefined
+        return {
+          type: 'appointment',
+          id: parsed.id ?? '',
+          title: entityTitle,
+          subtitle: String(args.title ?? ''),
+          meta: entityMeta ?? when,
+          contactId,
+        }
       }
       case 'log_bezoek': {
         if (!parsed?.success) return null
-        return { type: 'note', id: `bezoek-${Date.now()}`, title: `Bezoek: ${String(args.samenvatting ?? '').slice(0, 55)}…`, contactId: String(args.contactId ?? '') }
+        const details: { label: string; value: string }[] = []
+        if (args.samenvatting)         details.push({ label: 'Uitkomst',         value: String(args.samenvatting).slice(0, 80) })
+        if (args.klantType)            details.push({ label: 'Type',             value: String(args.klantType) })
+        if (args.groothandel)          details.push({ label: 'Groothandel',      value: String(args.groothandel) })
+        if (args.producten)            details.push({ label: 'Producten',        value: String(args.producten) })
+        if (args.vervolgActie && args.vervolgActie !== 'geen') {
+          const vervolg = args.vervolgDatum
+            ? `${args.vervolgActie} — ${new Date(String(args.vervolgDatum)).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' })}`
+            : String(args.vervolgActie)
+          details.push({ label: 'Vervolg',           value: vervolg })
+        }
+        if (args.pos_materiaal     != null) details.push({ label: 'POS materiaal',      value: args.pos_materiaal      ? 'Ja' : 'Nee' })
+        if (args.korting_afspraken != null) details.push({ label: 'Kortingafspraken',   value: args.korting_afspraken  ? 'Ja' : 'Nee' })
+        return {
+          type: 'bezoek',
+          id: parsed.id ?? `bezoek-${Date.now()}`,
+          title: String(args.companyName ?? (companyName || contactId)),
+          meta: contactAddress || undefined,
+          contactId,
+          details,
+        }
       }
       default: return null
     }

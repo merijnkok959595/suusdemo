@@ -2,8 +2,8 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { LiveKitRoom, RoomAudioRenderer, useRoomContext } from '@livekit/components-react'
-import { RoomEvent, type TranscriptionSegment, type Participant } from 'livekit-client'
-import { ArrowUp, Mic, MicOff, AudioLines, X, Plus, ImageIcon, Check } from 'lucide-react'
+import { RoomEvent, ParticipantKind, type TranscriptionSegment, type Participant, type RemoteParticipant } from 'livekit-client'
+import { ArrowUp, Mic, MicOff, Phone, X, Plus, ImageIcon, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
@@ -198,7 +198,8 @@ export default function SuusPage() {
       const existing = segmentStateRef.current.get(seg.id)
 
       if (!existing) {
-        // New segment — add as streaming
+        // New segment — skip empty (e.g. Scribe warmup noise)
+        if (!seg.text.trim()) continue
         segmentStateRef.current.set(seg.id, { id: seg.id, text: seg.text, final: seg.final, role })
         setMsgs(p => [...p, { role, text: seg.text, streaming: !seg.final }])
       } else if (existing.text !== seg.text || (seg.final && !existing.final)) {
@@ -463,6 +464,26 @@ export default function SuusPage() {
     }
   }, [sessionId])
 
+  // Stable callbacks — wrapped in useCallback so LiveKitEvents doesn't
+  // re-register listeners on every render
+  const handleAgentSpeaking = useCallback((v: boolean) => {
+    agentTalkingRef.current = v
+    setAgentTalking(v)
+  }, [])
+
+  const handleUserSpeaking = useCallback((v: boolean) => {
+    setUserTalking(v)
+  }, [])
+
+  const handleCard = useCallback((card: MiniCardData) => {
+    setMsgs(p => {
+      const last = p[p.length - 1]
+      if (last?.role === 'ai' && last.cards && !last.streaming)
+        return [...p.slice(0, -1), { ...last, cards: [...last.cards, card] }]
+      return [...p, { role: 'ai', text: '', cards: [card], streaming: false }]
+    })
+  }, [])
+
   const hasContent   = !!(input.trim() || pendingImage)
   const callIsActive = callStatus !== 'idle'
 
@@ -470,6 +491,8 @@ export default function SuusPage() {
     if (callStatus === 'connecting') return 'connecting' as const
     if (agentTalking) return 'speaking' as const
     if (userTalking)  return 'listening' as const
+    // Show connecting pulse while agent is thinking (tool calls etc.)
+    if (callStatus === 'active' && !agentTalking && !userTalking) return 'idle' as const
     return 'idle' as const
   }
 
@@ -491,18 +514,12 @@ export default function SuusPage() {
         }}
         onDisconnected={() => stopCall()}
       >
-        {/* Required: creates <audio> elements for every remote track */}
         <RoomAudioRenderer />
         <LiveKitEvents
           onTranscription={handleTranscription}
-          onAgentSpeaking={(v) => { agentTalkingRef.current = v; setAgentTalking(v) }}
-          onUserSpeaking={setUserTalking}
-          onCard={(card) => setMsgs(p => {
-            const last = p[p.length - 1]
-            if (last?.role === 'ai' && last.cards && !last.streaming)
-              return [...p.slice(0, -1), { ...last, cards: [...last.cards, card] }]
-            return [...p, { role: 'ai', text: '', cards: [card], streaming: false }]
-          })}
+          onAgentSpeaking={handleAgentSpeaking}
+          onUserSpeaking={handleUserSpeaking}
+          onCard={handleCard}
         />
       </LiveKitRoom>
     )}
@@ -512,32 +529,44 @@ export default function SuusPage() {
       <div className="flex-1 overflow-y-auto overflow-x-hidden [scrollbar-width:thin] [scrollbar-color:theme(colors.border-app)_transparent]">
         <div className="max-w-[720px] mx-auto w-full px-4 sm:px-6 pt-14 pb-4 flex flex-col">
 
-          {/* Empty state */}
-          {msgs.length === 0 && (
-            <div className="flex flex-col items-center gap-5 pt-16 pb-8 animate-fade-up">
-              <VoiceOrb state={callIsActive ? orbState() : 'idle'} size={100} imageSrc={agentPhoto} />
-              <div className="text-center">
-                <h2 className="text-[22px] font-bold tracking-tight text-copy mb-1 max-sm:text-lg">
-                  Hoi! Ik ben SUUS.
-                </h2>
-                <p className="text-[13px] text-copy-muted">
-                  {callIsActive
-                    ? (callStatus === 'connecting' ? 'Verbinden…' : agentTalking ? 'SUUS spreekt…' : !greetingDone ? 'SUUS spreekt…' : userTalking ? 'Luisteren…' : 'Zeg iets…')
-                    : 'Stel een vraag, stuur een foto of start een gesprek'}
+          {/* Empty state — or persistent orb header during active call */}
+          {(msgs.length === 0 || callIsActive) && (
+            <div className={cn(
+              'flex flex-col items-center gap-5 pb-8 animate-fade-up',
+              msgs.length === 0 ? 'pt-16' : 'pt-6',
+            )}>
+              <VoiceOrb state={callIsActive ? orbState() : 'idle'} size={msgs.length === 0 ? 100 : 64} imageSrc={agentPhoto} />
+              {msgs.length === 0 && (
+                <>
+                  <div className="text-center">
+                    <h2 className="text-[22px] font-bold tracking-tight text-copy mb-1 max-sm:text-lg">
+                      Hoi! Ik ben SUUS.
+                    </h2>
+                    <p className="text-[13px] text-copy-muted">
+                      {callIsActive
+                        ? (callStatus === 'connecting' ? 'Verbinden…' : agentTalking ? 'SUUS spreekt…' : !greetingDone ? 'SUUS spreekt…' : userTalking ? 'Luisteren…' : 'Zeg iets…')
+                        : 'Stel een vraag, stuur een foto of start een gesprek'}
+                    </p>
+                  </div>
+                  {!callIsActive && (
+                    <div className="grid grid-cols-2 gap-2 w-full max-w-[420px]">
+                      {DEFAULT_SUGGESTIONS.map((s, i) => (
+                        <button
+                          key={i}
+                          onClick={() => sendMessage(s)}
+                          className="px-3.5 py-2.5 rounded-[10px] border border-border-app bg-surface text-xs font-medium text-copy text-left leading-snug transition-colors hover:bg-active"
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+              {msgs.length > 0 && callIsActive && (
+                <p className="text-[12px] text-copy-muted -mt-2">
+                  {agentTalking ? 'SUUS spreekt…' : userTalking ? 'Luisteren…' : 'Zeg iets…'}
                 </p>
-              </div>
-              {!callIsActive && (
-                <div className="grid grid-cols-2 gap-2 w-full max-w-[420px]">
-                  {DEFAULT_SUGGESTIONS.map((s, i) => (
-                    <button
-                      key={i}
-                      onClick={() => sendMessage(s)}
-                      className="px-3.5 py-2.5 rounded-[10px] border border-border-app bg-surface text-xs font-medium text-copy text-left leading-snug transition-colors hover:bg-active"
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </div>
               )}
             </div>
           )}
@@ -751,7 +780,7 @@ export default function SuusPage() {
                       title={hasContent ? 'Versturen (Enter)' : 'Gesprek starten'}
                       className="w-9 h-9 rounded-full bg-copy text-white flex items-center justify-center hover:opacity-85 transition-opacity border-none cursor-pointer"
                     >
-                      {hasContent ? <ArrowUp size={17} strokeWidth={2.5} /> : <AudioLines size={17} strokeWidth={2} />}
+                      {hasContent ? <ArrowUp size={17} strokeWidth={2.5} /> : <Phone size={17} strokeWidth={2} />}
                     </button>
                   </>
                 )}
@@ -798,13 +827,28 @@ function LiveKitEvents({
   const room = useRoomContext()
 
   useEffect(() => {
+    // Read lk.agent.state from the agent participant attributes.
+    // The Python agent SDK publishes this automatically:
+    //   listening | thinking | speaking | idle
+    const getAgentState = (): string | undefined => {
+      const participants = Array.from(room.remoteParticipants.values())
+      const agent = participants.find(p => p.kind === ParticipantKind.AGENT)
+      return agent?.attributes?.['lk.agent.state']
+    }
+
+    const syncAgentState = () => {
+      onAgentSpeaking(getAgentState() === 'speaking')
+    }
+
+    const onAttrChanged = (_changedAttrs: Record<string, string>, participant: RemoteParticipant | Participant) => {
+      if (participant.kind === ParticipantKind.AGENT) syncAgentState()
+    }
+
     const onTranscript = (segs: TranscriptionSegment[], p: Participant | undefined) =>
       onTranscription(segs, p)
 
-    const onSpeakers = (speakers: Participant[]) => {
-      onAgentSpeaking(speakers.some(s => !s.isLocal))
+    const onSpeakers = (speakers: Participant[]) =>
       onUserSpeaking(speakers.some(s => s.isLocal))
-    }
 
     const onData = (data: Uint8Array) => {
       try {
@@ -813,13 +857,20 @@ function LiveKitEvents({
       } catch { /* ignore */ }
     }
 
-    room.on(RoomEvent.TranscriptionReceived, onTranscript)
-    room.on(RoomEvent.ActiveSpeakersChanged, onSpeakers)
-    room.on(RoomEvent.DataReceived, onData)
+    // Sync immediately for already-connected agent
+    syncAgentState()
+
+    room.on(RoomEvent.ParticipantAttributesChanged, onAttrChanged)
+    room.on(RoomEvent.ParticipantConnected,         syncAgentState)
+    room.on(RoomEvent.TranscriptionReceived,        onTranscript)
+    room.on(RoomEvent.ActiveSpeakersChanged,        onSpeakers)
+    room.on(RoomEvent.DataReceived,                 onData)
     return () => {
-      room.off(RoomEvent.TranscriptionReceived, onTranscript)
-      room.off(RoomEvent.ActiveSpeakersChanged, onSpeakers)
-      room.off(RoomEvent.DataReceived, onData)
+      room.off(RoomEvent.ParticipantAttributesChanged, onAttrChanged)
+      room.off(RoomEvent.ParticipantConnected,         syncAgentState)
+      room.off(RoomEvent.TranscriptionReceived,        onTranscript)
+      room.off(RoomEvent.ActiveSpeakersChanged,        onSpeakers)
+      room.off(RoomEvent.DataReceived,                 onData)
     }
   }, [room, onTranscription, onAgentSpeaking, onUserSpeaking, onCard])
 

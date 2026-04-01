@@ -9,7 +9,9 @@ import Link from 'next/link'
 import { Building2, CheckSquare, CalendarDays, FileText, MapPin, ExternalLink, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-export type MiniCardType = 'contact_found' | 'contact_created' | 'task' | 'appointment' | 'note' | 'success' | 'error'
+export type MiniCardType = 'contact_found' | 'contact_created' | 'task' | 'appointment' | 'note' | 'bezoek' | 'success' | 'error'
+
+export type MiniCardDetail = { label: string; value: string }
 
 export type MiniCardData = {
   type:         MiniCardType
@@ -20,6 +22,7 @@ export type MiniCardData = {
   contactId?:   string        // for deep linking on task/appointment/note
   btnLabel?:    string        // override default button label
   btnHref?:     string        // override default button href
+  details?:     MiniCardDetail[]  // bezoek card — key/value rows
 }
 
 const TYPE_META: Record<MiniCardType, {
@@ -64,6 +67,13 @@ const TYPE_META: Record<MiniCardType, {
     btnLabel: 'Bekijk notities',
     href:     () => `/dashboard/notes`,
   },
+  bezoek: {
+    icon:     <CheckCircle2 size={17} className="text-green-600" />,
+    badge:    '✓ Bezoek gelogd',
+    badgeCls: 'bg-green-100 text-green-700',
+    btnLabel: 'Bekijk contact',
+    href:     (c) => `/dashboard/contacts/${c.contactId ?? c.id}`,
+  },
   success: {
     icon:     <CheckCircle2 size={17} className="text-copy" />,
     badge:    '✓ Gelukt',
@@ -101,13 +111,29 @@ export function MiniCard({ card }: { card: MiniCardData }) {
             {meta.badge}
           </span>
         </div>
-        {card.subtitle && (
-          <p className="text-[12px] text-copy-muted font-medium mt-0.5 leading-tight">{card.subtitle}</p>
-        )}
+
+        {/* address / date meta */}
         {card.meta && (
           <div className="flex items-center gap-1 mt-0.5">
-            <MapPin size={11} className="text-copy-muted flex-shrink-0" />
-            <span className="text-[12px] text-copy-muted truncate">{card.meta}</span>
+            <MapPin size={10} className="text-copy flex-shrink-0" />
+            <span className="text-[11.5px] text-copy-muted truncate">{card.meta}</span>
+          </div>
+        )}
+
+        {/* action detail — note snippet / task title / appointment title */}
+        {card.subtitle && (
+          <p className="text-[12px] text-copy-muted font-medium mt-0.5 leading-snug">{card.subtitle}</p>
+        )}
+
+        {/* Detail rows — for bezoek card */}
+        {card.details && card.details.length > 0 && (
+          <div className="mt-1.5 mb-1 flex flex-col gap-0.5">
+            {card.details.map((d, i) => (
+              <div key={i} className="flex gap-1.5 text-[11.5px] leading-[1.5]">
+                <span className="text-copy-muted font-medium shrink-0 w-[90px] truncate">{d.label}</span>
+                <span className="text-copy">{d.value}</span>
+              </div>
+            ))}
           </div>
         )}
 
