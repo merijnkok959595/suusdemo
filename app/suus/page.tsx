@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { LiveKitRoom, useRoomContext } from '@livekit/components-react'
+import { LiveKitRoom, RoomAudioRenderer, useRoomContext } from '@livekit/components-react'
 import { RoomEvent, type TranscriptionSegment, type Participant } from 'livekit-client'
 import { ArrowUp, Mic, MicOff, AudioLines, X, Plus, ImageIcon, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
@@ -491,6 +491,8 @@ export default function SuusPage() {
         }}
         onDisconnected={() => stopCall()}
       >
+        {/* Required: creates <audio> elements for every remote track */}
+        <RoomAudioRenderer />
         <LiveKitEvents
           onTranscription={handleTranscription}
           onAgentSpeaking={(v) => { agentTalkingRef.current = v; setAgentTalking(v) }}
