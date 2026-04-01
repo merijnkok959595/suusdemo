@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk'
+import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'livekit-server-sdk'
 import { resolveOrgId, adminDb } from '@/lib/auth/resolveOrg'
 
 export const runtime     = 'nodejs'
@@ -44,6 +44,16 @@ export async function POST() {
       name:     roomName,
       metadata: organizationId,
     })
+
+    // Explicitly dispatch the agent — required when agent runs on Railway
+    // (no LiveKit Cloud auto-dispatch). The duplicate-agent guard in agent.py
+    // handles the case where auto-dispatch is also active.
+    const dispatch = new AgentDispatchClient(
+      LIVEKIT_URL.replace('wss://', 'https://').replace('ws://', 'http://'),
+      LIVEKIT_API_KEY,
+      LIVEKIT_API_SECRET,
+    )
+    await dispatch.createDispatch(roomName, 'agent')
 
     return NextResponse.json({
       // New shape expected by @livekit/components-react LiveKitRoom
