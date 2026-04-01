@@ -23,7 +23,7 @@ from livekit.agents import (
     cli,
     function_tool,
 )
-from livekit.plugins import deepgram, elevenlabs, openai as openai_plugin
+from livekit.plugins import deepgram, openai as openai_plugin
 from livekit.plugins import silero
 
 load_dotenv()
@@ -339,9 +339,9 @@ async def entrypoint(ctx: JobContext) -> None:
             language="nl",
         ),
         llm=openai_plugin.LLM(model="gpt-4.1"),
-        tts=elevenlabs.TTS(
-            model="eleven_flash_v2_5",
-            voice="Nicole",           # warm, natural Dutch female voice
+        tts=openai_plugin.TTS(
+            model="tts-1",
+            voice="nova",             # warm, natural — works well for Dutch
         ),
     )
 
