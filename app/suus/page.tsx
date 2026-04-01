@@ -1,30 +1,16 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { RealtimeAgent, RealtimeSession, tool } from '@openai/agents/realtime'
-import { z } from 'zod'
-import { ArrowUp, Mic, MicOff, AudioLines, X, Plus, ImageIcon, Check, MapPin } from 'lucide-react'
+import { Room, RoomEvent, type TranscriptionSegment, type Participant } from 'livekit-client'
+import { ArrowUp, Mic, MicOff, AudioLines, X, Plus, ImageIcon, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
 import { VoiceOrb } from '@/components/ui/voice-orb'
 import BriefingCard, { type BriefingData } from '@/components/BriefingCard'
 import { MiniCardList, type MiniCardData } from '@/components/ui/MiniCard'
-import { buildSetupInstructions, buildActiesInstructions, type VoiceOrgContext } from '@/lib/ai/voice-prompts'
 
 /* ─── Types ────────────────────────────────────────────────────────────────── */
-
-type DemoStage = 'lookup' | 'crm' | 'acties'
-
-type CompanyInfo = {
-  name:        string
-  address?:    string
-  city?:       string
-  phone?:      string
-  found?:      boolean
-  contactNaam?: string
-  contactId?:  string
-}
 
 type ContactCardData = {
   contactId:   string
@@ -42,279 +28,11 @@ type Msg = {
   image_url?:    string
   briefingData?: BriefingData
   contactsData?: ContactCardData[]
-  companyData?:  CompanyInfo
   cards?:        MiniCardData[]
 }
 
-type Collected = {
-  bedrijfsnaam?: string
-  plaatsnaam?:   string
-  naam?:         string
-  adres?:        string
-  telefoon?:     string
-  contactId?:    string
-  contactNaam?:  string
-  crmStatus?:    'found' | 'created'
-}
-
-/* ─── Tool execution helper ─────────────────────────────────────────────────── */
-
-async function callVoiceTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-  const res = await fetch('/api/ai/voice-tool', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, args }),
-  })
-  const { result } = await res.json()
-  return result
-}
-
-function getField(r: unknown, ...keys: string[]): string | undefined {
-  try {
-    const obj = typeof r === 'string' ? JSON.parse(r) : r
-    for (const key of keys) {
-      const val =
-        (obj as Record<string, unknown>)?.[key] ??
-        (obj as Record<string, Record<string, unknown>>)?.contact?.[key] ??
-        (obj as Record<string, Record<string, unknown>>)?.data?.[key]
-      if (typeof val === 'string' && val) return val
-    }
-  } catch { /* ignore */ }
-  return undefined
-}
-
-/* ─── Tool factories ─────────────────────────────────────────────────────── */
-
-function makeSetupTools(
-  collected: Collected,
-  companyMsg: (info: CompanyInfo) => void,
-  stageSet:   (s: DemoStage) => void,
-) {
-  return [
-    tool({
-      name: 'contact_enrich',
-      description: `Zoek bedrijfsadres via Google Places. Verplicht aanroepen — nooit raden.
-Geef query als "bedrijfsnaam plaatsnaam", bijv. "Risottini Amsterdam".`,
-      parameters: z.object({
-        query: z.string().describe('Bedrijfsnaam + plaatsnaam'),
-      }),
-      execute: async (args) => {
-        stageSet('lookup')
-        Object.assign(collected, { bedrijfsnaam: args.query })
-        const result = await callVoiceTool('contact_enrich', args as Record<string, unknown>)
-        let parsed: Record<string, unknown> | null = null
-        try { parsed = typeof result === 'string' ? JSON.parse(result) : result as Record<string, unknown> } catch { /* ignore */ }
-        const naam     = (parsed?.name as string | undefined) ?? collected.bedrijfsnaam
-        const adres    = parsed?.address as string | undefined
-        const telefoon = parsed?.phone as string | undefined
-        Object.assign(collected, { naam, adres, telefoon })
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-
-    tool({
-      name: 'contact_search',
-      description: 'Zoek een contact op in het CRM. Verplicht aanroepen — nooit raden.',
-      parameters: z.object({
-        query: z.string().describe('Bedrijfsnaam + stad'),
-      }),
-      execute: async (args) => {
-        stageSet('crm')
-        const result = await callVoiceTool('contact_search', args as Record<string, unknown>)
-        const s      = typeof result === 'string' ? result : JSON.stringify(result)
-        let parsed: Record<string, unknown> | null = null
-        try { parsed = JSON.parse(s) } catch { /* ignore */ }
-        const found    = !!(parsed && Number(parsed.count) > 0)
-        const contacts = parsed?.contacts as Record<string, unknown>[] | undefined
-        const first    = contacts?.[0]
-        const contactId   = (first?.id ?? first?.contactId) as string | undefined
-        const contactNaam = first?.naam as string | undefined
-        const bedrijf     = first?.bedrijf as string | undefined
-        if (contactId) Object.assign(collected, { contactId, crmStatus: found ? 'found' : undefined, contactNaam })
-        if (found && first) {
-          companyMsg({
-            name:        bedrijf ?? collected.naam ?? args.query,
-            address:     collected.adres,
-            city:        first.stad as string | undefined,
-            phone:       (first.phone as string | undefined) ?? collected.telefoon,
-            contactNaam,
-            found:       true,
-            contactId,
-          })
-        }
-        return s
-      },
-    }),
-
-    tool({
-      name: 'contact_create',
-      description: 'Maak een nieuw contact aan in het CRM.',
-      parameters: z.object({
-        companyName: z.string(),
-        city:        z.string().optional(),
-        firstName:   z.string().optional(),
-        email:       z.string().optional(),
-        phone:       z.string().optional(),
-        type:        z.enum(['lead', 'customer']),
-      }),
-      execute: async (args) => {
-        const result    = await callVoiceTool('contact_create', args as Record<string, unknown>)
-        const contactId = getField(result, 'id', 'contactId')
-        if (contactId) Object.assign(collected, { contactId, crmStatus: 'created' })
-        companyMsg({
-          name:        args.companyName,
-          city:        args.city,
-          contactNaam: args.firstName,
-          found:       false,
-          contactId,
-        })
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-  ]
-}
-
-function makeActiesTools(
-  collected: Collected,
-  cardMsg: (card: MiniCardData) => void,
-) {
-  return [
-    tool({
-      name: 'contact_briefing',
-      description: 'Geeft volledige briefing van een contact: notities, taken, afspraken.',
-      parameters: z.object({ contactId: z.string() }),
-      execute: async (args) => {
-        const result = await callVoiceTool('contact_briefing', args as Record<string, unknown>)
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-
-    tool({
-      name: 'contact_update',
-      description: 'Wijzig velden van een bestaand contact.',
-      parameters: z.object({
-        contactId:   z.string(),
-        companyName: z.string().optional(),
-        type:        z.enum(['lead', 'customer']).optional(),
-      }),
-      execute: async (args) => {
-        const result = await callVoiceTool('contact_update', args as Record<string, unknown>)
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-
-    tool({
-      name: 'note_create',
-      description: 'Voeg een notitie toe aan een contact.',
-      parameters: z.object({ contactId: z.string(), body: z.string() }),
-      execute: async (args) => {
-        const result = await callVoiceTool('note_create', args as Record<string, unknown>)
-        const parsed = typeof result === 'string' ? (() => { try { return JSON.parse(result) } catch { return null } })() : result
-        if (parsed?.success && parsed?.id) {
-          const raw     = String(args.body)
-          const snippet = (raw.charAt(0).toUpperCase() + raw.slice(1)).slice(0, 60) + (raw.length > 60 ? '…' : '')
-          cardMsg({ type: 'note', id: parsed.id, title: snippet, contactId: String(args.contactId), subtitle: collected.contactNaam })
-        }
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-
-    tool({
-      name: 'task_create',
-      description: 'Maak een taak aan voor een contact.',
-      parameters: z.object({
-        contactId: z.string(),
-        title:     z.string(),
-        body:      z.string().optional(),
-        dueDate:   z.string().describe('ISO 8601 datum'),
-      }),
-      execute: async (args) => {
-        const result = await callVoiceTool('task_create', args as Record<string, unknown>)
-        const parsed = typeof result === 'string' ? (() => { try { return JSON.parse(result) } catch { return null } })() : result
-        if (parsed?.success && parsed?.id) {
-          const due = args.dueDate ? new Date(String(args.dueDate)).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' }) : undefined
-          cardMsg({ type: 'task', id: parsed.id, title: String(args.title), contactId: String(args.contactId), subtitle: collected.contactNaam, meta: due })
-        }
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-
-    tool({
-      name: 'appointment_create',
-      description: 'Plan een afspraak voor een contact.',
-      parameters: z.object({
-        contactId: z.string(),
-        title:     z.string(),
-        startTime: z.string().describe('ISO 8601'),
-        endTime:   z.string().describe('ISO 8601'),
-        notes:     z.string().optional(),
-      }),
-      execute: async (args) => {
-        const result = await callVoiceTool('appointment_create', args as Record<string, unknown>)
-        const parsed = typeof result === 'string' ? (() => { try { return JSON.parse(result) } catch { return null } })() : result
-        if (parsed?.success && parsed?.id) {
-          const when = args.startTime ? new Date(String(args.startTime)).toLocaleDateString('nl-NL', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : undefined
-          cardMsg({ type: 'appointment', id: parsed.id, title: String(args.title), contactId: String(args.contactId), subtitle: collected.contactNaam, meta: when })
-        }
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-
-    tool({
-      name: 'log_bezoek',
-      description: 'Log een salesbezoek: notitie + vervolg-taak/afspraak + contact update.',
-      parameters: z.object({
-        contactId:    z.string(),
-        samenvatting: z.string(),
-        vervolgActie: z.string().optional(),
-        vervolgDatum: z.string().optional(),
-        klantType:    z.enum(['Lead', 'Klant']).optional(),
-        producten:    z.string().optional(),
-      }),
-      execute: async (args) => {
-        const result = await callVoiceTool('log_bezoek', args as Record<string, unknown>)
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-
-    tool({
-      name: 'team_member_list',
-      description: 'Haal actieve teamleden op.',
-      parameters: z.object({}),
-      execute: async (args) => {
-        const result = await callVoiceTool('team_member_list', args as Record<string, unknown>)
-        return typeof result === 'string' ? result : JSON.stringify(result)
-      },
-    }),
-  ]
-}
-
-/* ─── Agents ─────────────────────────────────────────────────────────────── */
-
-function createAgents(
-  orgCtx:      VoiceOrgContext,
-  setupTools:  ReturnType<typeof tool>[],
-  actiesTools: ReturnType<typeof tool>[],
-) {
-  const actiesAgent: RealtimeAgent = new RealtimeAgent({
-    name: 'acties',
-    handoffDescription: 'Agent voor alle CRM-acties: bezoek loggen, notitie, taak, afspraak, briefing.',
-    instructions: buildActiesInstructions(orgCtx),
-    tools: actiesTools,
-    handoffs: [],
-  })
-
-  const setupAgent = new RealtimeAgent({
-    name: 'setup',
-    handoffDescription: 'Initiële agent: bedrijf identificeren via Google en contact vastleggen in CRM.',
-    instructions: buildSetupInstructions(orgCtx),
-    tools: setupTools,
-    handoffs: [actiesAgent],
-  })
-
-  ;(actiesAgent.handoffs as RealtimeAgent[]).push(setupAgent)
-  return setupAgent
-}
+// Transcript tracking per segment ID for streaming updates
+type TranscriptSegmentState = { id: string; text: string; final: boolean; role: 'user' | 'ai' }
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -403,8 +121,7 @@ export default function SuusPage() {
   const [agentTalking, setAgentTalking] = useState(false)
   const [userTalking,  setUserTalking]  = useState(false)
   const [muted,        setMuted]        = useState(false)
-  const [demoStage,    setDemoStage]    = useState<DemoStage>('lookup')
-  const [company,      setCompany]      = useState<CompanyInfo | null>(null)
+  const [callId,       setCallId]       = useState<string | null>(null)
   const [attachOpen,   setAttachOpen]   = useState(false)
   const [pendingImage, setPendingImage] = useState<{ url: string; base64: string } | null>(null)
   const [dictating,    setDictating]    = useState(false)
@@ -413,27 +130,21 @@ export default function SuusPage() {
   const [callError,    setCallError]    = useState<string | null>(null)
   const agentPhoto = '/suus.jpg'
 
-  const sessionRef           = useRef<RealtimeSession | null>(null)
-  const greetingDoneRef      = useRef(false)
-  const greetingTriggeredRef = useRef(false)
-  const streamingRef         = useRef(false)
-  const streamingTextRef     = useRef('')
-  const userStreamRef        = useRef(false)
-  const userStreamTextRef    = useRef('')
-  const localStreamRef       = useRef<MediaStream | null>(null)
-  const callAnalyserRef      = useRef<AnalyserNode | null>(null)
-  const callAudioCtxRef      = useRef<AudioContext | null>(null)
-  const callAnimFrameRef     = useRef<number>(0)
-  const callBarsRef          = useRef<(HTMLDivElement | null)[]>([])
-  const dictRecorderRef      = useRef<MediaRecorder | null>(null)
-  const dictAnalyserRef      = useRef<AnalyserNode | null>(null)
-  const dictAudioCtxRef      = useRef<AudioContext | null>(null)
-  const dictAnimFrameRef     = useRef<number>(0)
-  const dictBarsRef          = useRef<(HTMLDivElement | null)[]>([])
-  const imageInputRef        = useRef<HTMLInputElement>(null)
-  const attachRef            = useRef<HTMLDivElement>(null)
-  const bottomRef            = useRef<HTMLDivElement>(null)
-  const textareaRef          = useRef<HTMLTextAreaElement>(null)
+  const livekitRoomRef     = useRef<Room | null>(null)
+  const segmentStateRef    = useRef<Map<string, TranscriptSegmentState>>(new Map())
+  const agentTalkingRef    = useRef(false)
+  const greetingDoneRef    = useRef(false)
+  const cardPollRef        = useRef<ReturnType<typeof setInterval> | null>(null)
+  const callBarsRef        = useRef<(HTMLDivElement | null)[]>([])
+  const dictRecorderRef    = useRef<MediaRecorder | null>(null)
+  const dictAnalyserRef    = useRef<AnalyserNode | null>(null)
+  const dictAudioCtxRef    = useRef<AudioContext | null>(null)
+  const dictAnimFrameRef   = useRef<number>(0)
+  const dictBarsRef        = useRef<(HTMLDivElement | null)[]>([])
+  const imageInputRef      = useRef<HTMLInputElement>(null)
+  const attachRef          = useRef<HTMLDivElement>(null)
+  const bottomRef          = useRef<HTMLDivElement>(null)
+  const textareaRef        = useRef<HTMLTextAreaElement>(null)
 
   const timer = useCallTimer(callStatus === 'active')
 
@@ -474,46 +185,79 @@ export default function SuusPage() {
     return () => window.removeEventListener('paste', h)
   }, [])
 
-  /* ── Visualizer ─────────────────────────────────────────────────────────── */
+  /* ── LiveKit transcription handler ──────────────────────────────────────── */
 
-  function startVisualizer(stream: MediaStream) {
-    const ctx = new AudioContext(); callAudioCtxRef.current = ctx
-    const an  = ctx.createAnalyser(); an.fftSize = 32; an.smoothingTimeConstant = 0.8
-    ctx.createMediaStreamSource(stream).connect(an)
-    callAnalyserRef.current = an
-    const data = new Uint8Array(an.frequencyBinCount)
-    function draw() {
-      if (!callAnalyserRef.current) return
-      callAnalyserRef.current.getByteFrequencyData(data)
-      callBarsRef.current.forEach((bar, i) => {
-        if (!bar) return
-        const v = data[Math.min(Math.floor(i / 3 * data.length / 2), data.length - 1)] / 255
-        bar.style.height = `${3 + v * 13}px`
-      })
-      callAnimFrameRef.current = requestAnimationFrame(draw)
+  function handleTranscription(segments: TranscriptionSegment[], participant: Participant | undefined) {
+    const isAgent = !participant?.isLocal
+    const role    = isAgent ? 'ai' as const : 'user' as const
+
+    for (const seg of segments) {
+      const existing = segmentStateRef.current.get(seg.id)
+
+      if (!existing) {
+        // New segment — add as streaming
+        segmentStateRef.current.set(seg.id, { id: seg.id, text: seg.text, final: seg.final, role })
+        setMsgs(p => [...p, { role, text: seg.text, streaming: !seg.final }])
+      } else if (existing.text !== seg.text || (seg.final && !existing.final)) {
+        // Update existing segment
+        segmentStateRef.current.set(seg.id, { ...existing, text: seg.text, final: seg.final })
+        setMsgs(p => {
+          const next = [...p]
+          // Find last streaming message of same role and update
+          const idx = next.findLastIndex(m => m.streaming && m.role === role)
+          if (idx >= 0) return [...next.slice(0, idx), { ...next[idx], text: seg.text, streaming: !seg.final }, ...next.slice(idx + 1)]
+          return next
+        })
+      }
+
+      if (seg.final) {
+        // Finalise any still-streaming messages for this role
+        setMsgs(p => p.map(m => m.streaming && m.role === role ? { ...m, streaming: false } : m))
+        if (isAgent && !greetingDoneRef.current) {
+          greetingDoneRef.current = true
+          setGreetingDone(true)
+        }
+      }
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
-    draw()
   }
 
-  function stopVisualizer() {
-    cancelAnimationFrame(callAnimFrameRef.current)
-    callAnalyserRef.current = null
-    callAudioCtxRef.current?.close(); callAudioCtxRef.current = null
+  /* ── Card polling ────────────────────────────────────────────────────────── */
+
+  function startCardPolling(id: string) {
+    if (cardPollRef.current) clearInterval(cardPollRef.current)
+    cardPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/voice/cards?roomName=${encodeURIComponent(id)}`)
+        const { cards } = await res.json() as { cards?: MiniCardData[] }
+        if (cards && cards.length > 0) {
+          setMsgs(p => {
+            const last = p[p.length - 1]
+            if (last?.role === 'ai' && last.cards && !last.streaming)
+              return [...p.slice(0, -1), { ...last, cards: [...last.cards, ...cards] }]
+            return [...p, { role: 'ai', text: '', cards, streaming: false }]
+          })
+        }
+      } catch { /* ignore */ }
+    }, 1000)
+  }
+
+  function stopCardPolling() {
+    if (cardPollRef.current) { clearInterval(cardPollRef.current); cardPollRef.current = null }
   }
 
   /* ── Voice call ─────────────────────────────────────────────────────────── */
 
   function stopCall() {
-    try { (sessionRef.current as RealtimeSession & { close?: () => void }).close?.() } catch { /* ignore */ }
-    sessionRef.current = null
-    localStreamRef.current?.getTracks().forEach(t => t.stop()); localStreamRef.current = null
-    stopVisualizer()
-    streamingRef.current = false; streamingTextRef.current = ''
-    userStreamRef.current = false; userStreamTextRef.current = ''
-    greetingDoneRef.current = false; setGreetingDone(false)
-    greetingTriggeredRef.current = false
+    stopCardPolling()
+    try { livekitRoomRef.current?.disconnect() } catch { /* ignore */ }
+    livekitRoomRef.current = null
+    segmentStateRef.current.clear()
+    agentTalkingRef.current = false
+    greetingDoneRef.current = false
+    setGreetingDone(false)
     setCallStatus('idle'); setAgentTalking(false); setUserTalking(false); setMuted(false)
-    setDemoStage('lookup'); setCompany(null)
+    setCallId(null)
     setMsgs(p => p.map(m => m.streaming ? { ...m, streaming: false } : m))
   }
 
@@ -522,183 +266,54 @@ export default function SuusPage() {
 
     setCallStatus('connecting'); setCallError(null)
     try {
-      const tokenRes = await fetch('/api/ai/call', { method: 'POST' })
-      if (!tokenRes.ok) throw new Error('Kon gesprek niet starten')
+      const res = await fetch('/api/livekit/token', { method: 'POST' })
+      if (!res.ok) throw new Error('Kon gesprek niet starten')
 
-      const { client_secret, orgContext, error } = await tokenRes.json() as {
-        client_secret?: { value: string }
-        orgContext?: { agentName?: string; voice?: string; orgNaam?: string }
-        error?: string
+      const { token, roomName, url, error } = await res.json() as {
+        token?:    string
+        roomName?: string
+        url?:      string
+        error?:    string
       }
-      if (!client_secret?.value) throw new Error(error ?? 'No client secret')
+      if (!token) throw new Error(error ?? 'No token')
 
-      const voiceOrgCtx: VoiceOrgContext = {
-        agentName: orgContext?.agentName,
-        orgNaam:   orgContext?.orgNaam,
-      }
+      setCallId(roomName ?? null)
 
-      const collected: Collected = {}
+      const room = new Room({
+        adaptiveStream:   true,
+        dynacast:         true,
+      })
+      livekitRoomRef.current = room
 
-      const companyMsg = (info: CompanyInfo) =>
-        setMsgs(p => [...p, { role: 'ai', text: '', companyData: info, streaming: false }])
-
-      const cardMsg = (card: MiniCardData) =>
-        setMsgs(p => {
-          const last = p[p.length - 1]
-          if (last?.role === 'ai' && last.cards)
-            return [...p.slice(0, -1), { ...last, cards: [...last.cards, card] }]
-          return [...p, { role: 'ai', text: '', cards: [card], streaming: false }]
-        })
-
-      const setupAgent = createAgents(
-        voiceOrgCtx,
-        makeSetupTools(collected, companyMsg, setDemoStage),
-        makeActiesTools(collected, cardMsg),
-      )
-
-      const session = new RealtimeSession(setupAgent, {
-        model: 'gpt-4o-realtime-preview',
-        config: {
-          outputModalities: ['audio'],
-          audio: {
-            input: {
-              transcription:  { model: 'gpt-4o-transcribe', language: 'nl' },
-              turnDetection: {
-                type: 'server_vad', threshold: 0.7,
-                prefixPaddingMs: 300, silenceDurationMs: 1000,
-              },
-            },
-            output: { voice: (orgContext?.voice ?? 'coral') as 'coral' },
-          },
-        },
+      room.on(RoomEvent.Connected, () => {
+        setCallStatus('active')
+        greetingDoneRef.current = false
+        setGreetingDone(false)
+        if (roomName) startCardPolling(roomName)
       })
 
-      // Agent handoff
-      session.on('agent_handoff', (_ctx: unknown, _from: unknown, toAgent: { name?: string }) => {
-        const agentName = toAgent?.name ?? ''
-        if (agentName === 'acties') {
-          setDemoStage('acties')
-        } else if (agentName === 'setup') {
-          Object.keys(collected).forEach(k => delete (collected as Record<string, unknown>)[k])
-          setDemoStage('lookup'); setCompany(null)
+      room.on(RoomEvent.Disconnected, () => stopCall())
+
+      room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
+        const agentSpeaking = speakers.some(s => !s.isLocal)
+        const userSpeaking  = speakers.some(s => s.isLocal)
+        agentTalkingRef.current = agentSpeaking
+        setAgentTalking(agentSpeaking)
+        setUserTalking(userSpeaking)
+        if (!agentSpeaking) {
+          setMsgs(p => p.map(m => m.streaming && m.role === 'ai' ? { ...m, streaming: false } : m))
         }
       })
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      session.transport.on('*', (ev: any) => {
-        switch (ev.type) {
-          case 'session.updated':
-            if (!greetingTriggeredRef.current) {
-              greetingTriggeredRef.current = true
-              session.transport.sendEvent({ type: 'response.create' })
-            }
-            break
-
-          case 'input_audio_buffer.speech_started': setUserTalking(true);  break
-          case 'input_audio_buffer.speech_stopped': setUserTalking(false); break
-          case 'response.output_audio.delta':       setAgentTalking(true); break
-          case 'response.output_audio.done':        setAgentTalking(false); break
-          case 'response.done':
-            setAgentTalking(false)
-            if (!greetingDoneRef.current) {
-              greetingDoneRef.current = true
-              setGreetingDone(true)
-              session.transport.sendEvent({
-                type: 'session.update',
-                session: {
-                  turn_detection: {
-                    type: 'server_vad',
-                    threshold: 0.7,
-                    prefix_padding_ms: 300,
-                    silence_duration_ms: 1000,
-                  },
-                },
-              })
-            }
-            break
-
-          case 'response.output_audio_transcript.delta': {
-            const delta: string = ev.delta ?? ''
-            if (!streamingRef.current) {
-              streamingRef.current = true; streamingTextRef.current = delta
-              setMsgs(p => [...p, { role: 'ai', text: delta, streaming: true }])
-            } else {
-              streamingTextRef.current += delta
-              const text = streamingTextRef.current
-              setMsgs(p => {
-                const next = [...p]; const i = next.findLastIndex(m => m.role === 'ai' && m.streaming)
-                if (i >= 0) next[i] = { ...next[i], text }; return next
-              })
-            }
-            bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-            break
-          }
-
-          case 'response.output_audio_transcript.done':
-            streamingRef.current = false; streamingTextRef.current = ''
-            setMsgs(p => p.map(m => m.role === 'ai' && m.streaming ? { ...m, streaming: false } : m))
-            break
-
-          case 'conversation.item.input_audio_transcription.delta': {
-            const delta: string = ev.delta ?? ''
-            if (!userStreamRef.current) {
-              userStreamRef.current = true; userStreamTextRef.current = delta
-              setMsgs(p => [...p, { role: 'user', text: delta, streaming: true }])
-            } else {
-              userStreamTextRef.current += delta
-              const text = userStreamTextRef.current
-              setMsgs(p => {
-                const next = [...p]; const i = next.findLastIndex(m => m.role === 'user')
-                if (i >= 0 && next[i].streaming) next[i] = { ...next[i], text }; return next
-              })
-            }
-            bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-            break
-          }
-
-          case 'conversation.item.input_audio_transcription.completed': {
-            const t: string = ev.transcript?.trim() ?? ''
-            userStreamRef.current = false; userStreamTextRef.current = ''
-            if (t) {
-              setMsgs(p => {
-                const next = [...p]
-                const last = next.findLastIndex(m => m.role === 'user')
-                if (last >= 0 && next[last].streaming) {
-                  next[last] = { role: 'user', text: t, streaming: false }
-                } else {
-                  next.push({ role: 'user', text: t })
-                }
-                return next
-              })
-              bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-            }
-            break
-          }
-        }
+      room.on(RoomEvent.TranscriptionReceived, (
+        segments: TranscriptionSegment[],
+        participant: Participant | undefined,
+      ) => {
+        handleTranscription(segments, participant)
       })
 
-      await session.connect({ apiKey: client_secret.value })
-      sessionRef.current = session
-      greetingDoneRef.current = false; setGreetingDone(false)
-      greetingTriggeredRef.current = false
-      setCallStatus('active')
-
-      // Disable VAD during greeting — re-enabled after first response.done
-      session.transport.sendEvent({
-        type: 'session.update',
-        session: {
-          voice:                     (orgContext?.voice ?? 'coral') as 'coral',
-          instructions:              'Spreek ALTIJD en UITSLUITEND Nederlands, ongeacht de taal van de gebruiker of van tool-resultaten.',
-          input_audio_transcription: { model: 'gpt-4o-transcribe', language: 'nl' },
-          turn_detection:            null,
-          temperature:               0.6,
-        },
-      })
-
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        localStreamRef.current = stream; startVisualizer(stream)
-      } catch { /* visualizer optional */ }
+      await room.connect(url ?? process.env.NEXT_PUBLIC_LIVEKIT_URL ?? '', token)
+      await room.localParticipant.setMicrophoneEnabled(true)
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -708,8 +323,10 @@ export default function SuusPage() {
   }
 
   function toggleMute() {
-    const s = sessionRef.current; if (!s) return
-    const next = !muted; s.mute(next); setMuted(next)
+    const room = livekitRoomRef.current; if (!room) return
+    const next = !muted
+    room.localParticipant.setMicrophoneEnabled(next)
+    setMuted(!next)
   }
 
   /* ── Dictation ──────────────────────────────────────────────────────────── */
@@ -950,19 +567,6 @@ export default function SuusPage() {
                   <div className="min-w-0 max-w-[520px]">
                     <p className="text-[11px] font-bold text-copy mb-1">SUUS</p>
 
-                    {/* Company / contact card inline */}
-                    {m.companyData && !m.streaming && (
-                      <div className="mb-2">
-                        <MiniCardList cards={[{
-                          type:      m.companyData.found ? 'contact_found' : 'contact_created',
-                          id:        m.companyData.contactId ?? '',
-                          title:     m.companyData.name,
-                          subtitle:  m.companyData.contactNaam,
-                          meta:      [m.companyData.address, m.companyData.city].filter(Boolean).join(', ') || undefined,
-                          contactId: m.companyData.contactId,
-                        }]} />
-                      </div>
-                    )}
 
                     {m.text ? (
                       <div className="text-[14.5px] leading-[1.6] text-copy-muted">

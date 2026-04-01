@@ -3,14 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "tsx server.ts",
     "build": "next build",
-    "start": "next start"
+    "start": "NODE_ENV=production tsx server.ts"
   },
   "dependencies": {
+    "@livekit/agents": "^1.2.2",
+    "@livekit/agents-plugin-openai": "^1.2.2",
     "@openai/agents": "^0.8.1",
     "@supabase/supabase-js": "^2.101.1",
     "clsx": "^2.1.1",
+    "livekit-client": "^2.18.0",
+    "livekit-server-sdk": "^2.15.0",
     "lucide-react": "^0.474.0",
     "next": "14.2.35",
     "openai": "^6.33.0",
@@ -19,6 +23,8 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "resend": "^6.10.0",
+    "retell-client-js-sdk": "^2.0.7",
+    "retell-sdk": "^5.10.3",
     "tailwind-merge": "^3.5.0",
     "zod": "^4.3.6"
   },
@@ -26,9 +32,12 @@
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@types/ws": "^8.18.1",
     "autoprefixer": "^10.4.27",
     "postcss": "^8.5.8",
     "tailwindcss": "^3.4.19",
-    "typescript": "^5"
+    "tsx": "^4.21.0",
+    "typescript": "^5",
+    "ws": "^8.20.0"
   }
 }
