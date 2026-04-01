@@ -7,7 +7,6 @@ Tools: call Next.js /api/voice/tool (bestaande CRM logica)
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from typing import Annotated
@@ -19,12 +18,12 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     RunContext,
+    TurnHandlingOptions,
     WorkerOptions,
     cli,
     function_tool,
 )
-from livekit.plugins import deepgram, openai as openai_plugin
-from livekit.plugins import silero
+from livekit.plugins import deepgram, openai as openai_plugin, silero
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -347,7 +346,10 @@ async def entrypoint(ctx: JobContext) -> None:
         llm=openai_plugin.LLM(model="gpt-4.1"),
         tts=openai_plugin.TTS(
             model="tts-1",
-            voice="nova",             # warm, natural — works well for Dutch
+            voice="nova",
+        ),
+        turn_handling=TurnHandlingOptions(
+            interruption={"mode": "adaptive"},
         ),
     )
 
@@ -355,9 +357,6 @@ async def entrypoint(ctx: JobContext) -> None:
         room=ctx.room,
         agent=agent,
     )
-
-    # Keep the entrypoint alive until the room closes
-    await asyncio.sleep(float("inf"))
 
 
 # ─── Entry ────────────────────────────────────────────────────────────────────
