@@ -7,6 +7,7 @@ Three focused agents:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -425,12 +426,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(room=ctx.room, agent=router)
 
-    # Greeting directly on the session — safer than on_enter for the initial agent
+    # AEC warmup runs for ~3s after the first participant audio arrives and
+    # suppresses TTS playback during that window. Wait it out before greeting.
+    await asyncio.sleep(3.5)
     logger.info("Sending opening greeting")
     await session.say(
         "Hoi! Ik ben SUUS. "
         "Noem de bedrijf- en plaatsnaam, dan help ik je direct verder."
     )
+    logger.info("Greeting done")
 
 
 # ─── Entry ────────────────────────────────────────────────────────────────────
